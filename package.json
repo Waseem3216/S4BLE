@@ -1,6 +1,6 @@
 {
   "name": "sable",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "private": true,
   "type": "module",
   "description": "Sable is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.",

@@ -1,5 +1,35 @@
 # Sable — Vercel deployment
 
+## Important root-route fix
+
+This package includes `vercel.json` with a root rewrite from `/` to `/index.html`.
+It also includes an Express `/` fallback that redirects to `/index.html` on Vercel.
+This prevents the `Cannot GET /` response from the Express function.
+
+## Vercel project settings
+
+- Framework Preset: Express (or let Vercel auto-detect)
+- Root Directory: repository root (`./`)
+- Build Command: leave default / blank
+- Output Directory: leave blank
+- Install Command: `npm install` (default is fine)
+
+## Verify after deployment
+
+Open these URLs:
+
+- `/` — should display the Sable application
+- `/index.html` — should display the same application
+- `/styles.css` — should return CSS
+- `/app.js` — should return JavaScript
+- `/api/health` — should return JSON with version 3.2.2
+
+If `/index.html` works but `/` does not, verify `vercel.json` is at the repository root and redeploy without build cache.
+
+---
+
+# Sable — Vercel deployment
+
 ## Correct project structure
 
 - `public/` contains the browser frontend (`index.html`, CSS, JavaScript, images, favicon, loader animation).

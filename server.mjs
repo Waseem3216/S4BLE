@@ -30,8 +30,16 @@ app.use(helmet({
 
 app.use(express.json({ limit: '8mb' }));
 
+// Vercel sends `/` to the Express function. The browser-facing HTML lives in
+// public/index.html, which Vercel serves from its CDN as `/index.html`.
+// Redirecting here is a safe fallback if the edge rewrite is ever bypassed.
+app.get('/', (_req, res) => {
+  if (isVercel) return res.redirect(302, '/index.html');
+  return res.sendFile(path.join(publicDir, 'index.html'));
+});
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'Sable analysis engine', version: '3.2.1' });
+  res.json({ ok: true, service: 'Sable analysis engine', version: '3.2.2' });
 });
 
 app.post('/api/analyze', async (req, res) => {
