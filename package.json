@@ -1,0 +1,22 @@
+{
+  "name": "sable",
+  "version": "3.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Sable is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "check": "node --check server.mjs && node --check app.js && node --check features.js && node --check engine/analyzer.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@cdktf/hcl2json": "0.21.0",
+    "express": "5.2.1",
+    "helmet": "8.3.0",
+    "js-yaml": "4.3.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

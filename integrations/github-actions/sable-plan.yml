@@ -1,0 +1,29 @@
+name: Sable Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform init
+        run: terraform init -input=false
+      - name: Terraform plan
+        run: terraform plan -input=false -out=tfplan
+      - name: Convert plan to machine-readable JSON
+        run: terraform show -json tfplan > plan.json
+      - name: Upload Sable plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sable-plan-json
+          path: plan.json
+          retention-days: 7
