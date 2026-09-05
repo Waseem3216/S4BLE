@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sable | Cloud Architecture Analysis and Terraform Risk Review</title>
+  <meta name="theme-color" content="#17191f" />
+  <meta name="description" content="Sable is a browser-based cloud architecture analyzer, Terraform PR reviewer, and infrastructure import workspace." />
+  <link rel="icon" type="image/x-icon" href="assets/sable-favicon.ico" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/sable-favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/sable-favicon-16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/sable-apple-touch-icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="light" class="loading">
+  <div class="sable-loader" id="sableLoader" role="status" aria-live="polite" aria-label="Loading Sable workspace">
+    <div class="sable-loader__inner">
+      <div class="sable-loader__animal-stage" id="sableLoaderStage" aria-hidden="true">
+        <div class="sable-loader__runner" id="sableLoaderRunner" role="img" aria-label="Running sable wearing a construction hard hat">
+          <span class="sable-runner__trail sable-runner__trail--one"></span>
+          <span class="sable-runner__trail sable-runner__trail--two"></span>
+          <span class="sable-runner__trail sable-runner__trail--three"></span>
+          <span class="sable-runner__ground-shadow"></span>
+          <img class="sable-runner__sprite" src="assets/sable-runner-motion-hardhat.webp?v=7" alt="" />
+        </div>
+      </div>
+      <div class="sable-loader__progress-shell" aria-hidden="true">
+        <div class="sable-loader__progress-track">
+          <span class="sable-loader__progress-fill" id="sableLoaderBar"></span>
+        </div>
+      </div>
+      <div class="sable-loader__wordmark">Sable</div>
+      <div class="sable-loader__status" id="sableLoaderStatus">Loading workspace…</div>
+      <div class="sable-loader__percent" id="sableLoaderPercent">0%</div>
+    </div>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <img src="assets/sable-brand-logo-source.png" alt="" />
+        </div>
+        <div>
+          <strong>Sable</strong>
+          <span>Infrastructure Workspace</span>
+        </div>
+      </div>
+
+      <nav class="nav-stack" id="navStack">
+        <button class="nav-item active" data-route="overview" aria-current="page">
+          <span class="nav-icon">◫</span>
+          <span class="nav-label"><span class="nav-label-long">Infrastructure Posture</span><span class="nav-label-short">Posture</span></span>
+        </button>
+        <button class="nav-item" data-route="reviewer">
+          <span class="nav-icon">↗</span>
+          <span class="nav-label"><span class="nav-label-long">Terraform PR Reviewer</span><span class="nav-label-short">PR Review</span></span>
+        </button>
+        <button class="nav-item" data-route="importer">
+          <span class="nav-icon">↓</span>
+          <span class="nav-label"><span class="nav-label-long">Import Terraform / JSON / YAML</span><span class="nav-label-short">Import</span></span>
+        </button>
+      </nav>
+
+      <div class="sidebar-card">
+        <p class="eyebrow">Workspace</p>
+        <h3 id="workspaceName">No workspace loaded</h3>
+        <p id="workspaceSummary">No infrastructure imported yet.</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="routeEyebrow">Cloud Infrastructure Review</p>
+          <h1 id="routeTitle">Infrastructure Posture Overview</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="theme-switch" role="group" aria-label="Choose color theme">
+            <button class="theme-option active" id="themeDarkBtn" data-theme-choice="dark" type="button">Dark</button>
+            <button class="theme-option" id="themeLightBtn" data-theme-choice="light" type="button">Light</button>
+          </div>
+          <button class="secondary-button" id="exportMarkdownBtn">Export report</button>
+          <button class="primary-button" id="openImportPickerBtn" type="button">Import infrastructure</button>
+        </div>
+      </header>
+
+      <section class="page active" id="overviewPage" aria-labelledby="routeTitle">
+        <section class="workspace-banner panel" id="workspaceBanner" aria-label="Current workspace summary">
+          <div class="workspace-banner-copy">
+            <p class="eyebrow">Current workspace</p>
+            <h2 id="workspaceDisplayName">No workspace loaded</h2>
+            <p id="workspaceDescription">No infrastructure imported yet.</p>
+          </div>
+          <div class="workspace-banner-meta">
+            <div><strong id="workspaceSourceType">—</strong><span>Source</span></div>
+            <div><strong id="workspaceAnalysisMode">—</strong><span>Analysis mode</span></div>
+            <div><strong id="workspaceResourceCount">0</strong><span>Resources</span></div>
+          </div>
+        </section>
+
+        <div class="hero-grid">
+          <article class="hero-card">
+            <div>
+              <p class="eyebrow">Sable Posture Score</p>
+              <h2><span id="healthScore">—</span><small>/100</small></h2>
+              <p id="healthNarrative">Import Terraform, JSON, or YAML to calculate an evidence-based posture score.</p>
+            </div>
+            <div class="score-ring" aria-label="Sable evidence-based posture score">
+              <svg viewBox="0 0 120 120" role="img">
+                <circle cx="60" cy="60" r="48" class="ring-bg"></circle>
+                <circle cx="60" cy="60" r="48" class="ring-progress" id="scoreRing"></circle>
+              </svg>
+              <span id="scoreRingText">—</span>
+            </div>
+          </article>
+
+          <article class="metric-card critical">
+            <p>Critical</p>
+            <strong id="criticalCount">0</strong>
+            <span>Immediate attention</span>
+          </article>
+          <article class="metric-card high">
+            <p>High</p>
+            <strong id="highCount">0</strong>
+            <span>Security / reliability</span>
+          </article>
+          <article class="metric-card medium">
+            <p>Medium</p>
+            <strong id="mediumCount">0</strong>
+            <span>Operational risk</span>
+          </article>
+          <article class="metric-card low">
+            <p>Low</p>
+            <strong id="lowCount">0</strong>
+            <span>Advisory</span>
+          </article>
+        </div>
+
+        <section class="panel architecture-panel" id="architecturePanel">
+          <div class="panel-header architecture-header" id="architectureHeader">
+            <div>
+              <p class="eyebrow">Architecture View</p>
+              <h2>Resource topology</h2>
+            </div>
+            <div class="panel-actions architecture-actions">
+              <span class="hint">Two-finger scroll to pan · pinch to zoom · drag empty space to move. Solid links are confirmed; dashed links are inferred.</span>
+              <div class="zoom-controls" role="group" aria-label="Architecture zoom controls">
+                <button class="mini-button" id="zoomOutBtn" type="button" title="Zoom out">−</button>
+                <input id="architectureZoomRange" class="zoom-range" type="range" min="35" max="220" step="5" value="100" aria-label="Architecture zoom level" />
+                <button class="mini-button" id="zoomInBtn" type="button" title="Zoom in">+</button>
+                <button class="mini-button zoom-value" id="zoomResetBtn" type="button" title="Reset zoom">100%</button>
+              </div>
+              <button class="icon-button" id="maximizeArchitectureBtn" type="button" title="Maximize architecture view" aria-label="Maximize architecture view">⛶</button>
+            </div>
+          </div>
+
+          <div class="architecture-canvas" id="architectureCanvas">
+            <svg class="connection-layer" id="connectionLayer" aria-hidden="true"></svg>
+            <div class="architecture-empty" id="architectureEmpty">
+              <h3>No architecture loaded</h3>
+              <p>Import Terraform, JSON, or YAML to preview your infrastructure.</p>
+              <button class="primary-button" type="button" data-open-import-picker>Import infrastructure</button>
+            </div>
+            <div class="architecture-grid" id="architectureGrid"></div>
+            <div class="architecture-explorer hidden" id="architectureExplorer" aria-live="polite">
+              <div class="explorer-toolbar">
+                <div>
+                  <p class="eyebrow" id="explorerEyebrow">Category topology</p>
+                  <h3 id="explorerTitle">Dependency map</h3>
+                  <p id="explorerSummary">Select a category to inspect direct infrastructure relationships.</p>
+                </div>
+                <div class="explorer-actions">
+                  <button class="secondary-button explorer-mode active" id="internalMapBtn" data-graph-mode="internal">Category only</button>
+                  <button class="secondary-button explorer-mode" id="contextMapBtn" data-graph-mode="context">Show cloud context</button>
+                  <button class="secondary-button" id="fitExplorerBtn" type="button" title="Reset zoom to show more of the map">Fit view</button>
+                  <button class="icon-button" id="closeExplorerBtn" type="button" title="Back to category overview" aria-label="Back to category overview">×</button>
+                </div>
+              </div>
+              <div class="explorer-stage" id="explorerStage" tabindex="0" aria-label="Architecture diagram viewport. Two-finger scroll to pan, pinch to zoom, or drag empty space to move around the diagram.">
+                <div class="explorer-lane-header-layer" id="explorerLaneHeaders" aria-hidden="true"></div>
+                <svg class="explorer-connections" id="explorerConnections" aria-hidden="true"></svg>
+                <div class="explorer-lanes" id="explorerLanes"></div>
+                <div class="explorer-node-layer" id="explorerNodeLayer"></div>
+                <div class="explorer-empty hidden" id="explorerEmpty">
+                  <strong>No direct links found</strong>
+                  <span>No confirmed relationships were found in the imported evidence for this view. Inferred relationships, when enabled, are rendered separately and labeled as inferred.</span>
+                </div>
+              </div>
+              <div class="explorer-footer">
+                <div class="relationship-list" id="relationshipList"></div>
+                <aside class="resource-inspector" id="resourceInspector">
+                  <strong>Select a resource</strong>
+                  <span>Click any resource box to inspect type, category, risk, and detected links.</span>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="content-grid two-col">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Risk Findings</p>
+                <h2>Findings</h2>
+              </div>
+              <select id="findingSeverityFilter" class="select-input" aria-label="Filter findings by severity">
+                <option value="all">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div class="finding-list" id="findingList"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Inventory</p>
+                <h2>Resources</h2>
+              </div>
+              <input class="search-input" id="resourceSearch" placeholder="Search resources..." aria-label="Search resources" />
+            </div>
+            <div class="resource-table-wrap">
+              <table class="resource-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Category</th>
+                    <th>Risk</th>
+                  </tr>
+                </thead>
+                <tbody id="resourceTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="reviewerPage" aria-labelledby="routeTitle">
+        <div class="reviewer-layout">
+          <section class="panel editor-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Terraform PR Risk Reviewer</p>
+                <h2>Paste Terraform source, plan JSON, state JSON, CloudFormation, or Kubernetes YAML</h2>
+              </div>
+              <div class="panel-actions">
+                <label class="file-button">
+                  Upload infrastructure files
+                  <input type="file" id="prFileInput" multiple accept=".tf,.tf.json,.json,.yaml,.yml" />
+                </label>
+              </div>
+            </div>
+            <textarea id="prInput" class="code-editor" spellcheck="false" placeholder="Paste Terraform HCL or machine-readable terraform show -json output. Human-readable terraform plan text is intentionally rejected for correctness."></textarea>
+            <div class="editor-actions">
+              <button class="secondary-button" id="clearPrBtn">Clear</button>
+              <button class="secondary-button" id="setBaselineBtn">Set current workspace as baseline</button>
+              <button class="primary-button" id="reviewPrBtn">Review PR risk</button>
+            </div>
+          </section>
+
+          <aside class="panel review-summary-panel">
+            <div class="panel-header compact">
+              <div>
+                <p class="eyebrow">Decision</p>
+                <h2 id="approvalDecision">Waiting for input</h2>
+              </div>
+            </div>
+            <div class="decision-card" id="decisionCard">
+              <strong id="prRiskScore">—</strong>
+              <span>PR risk score</span>
+            </div>
+            <div class="mini-metrics">
+              <div><span id="prAddCount">0</span><small>Add</small></div>
+              <div><span id="prChangeCount">0</span><small>Change</small></div>
+              <div><span id="prDeleteCount">0</span><small>Delete</small></div>
+            </div>
+            <button class="secondary-button full" id="exportPrReportBtn">Export PR review</button>
+          </aside>
+        </div>
+
+        <div class="content-grid two-col">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">PR Findings</p>
+                <h2>Findings</h2>
+              </div>
+            </div>
+            <div class="finding-list" id="prFindingList"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Change Impact</p>
+                <h2>Resource Diff</h2>
+              </div>
+            </div>
+            <div class="diff-list" id="prDiffList"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="importerPage" aria-labelledby="routeTitle">
+        <div class="import-grid">
+          <section class="panel import-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Import Terraform / JSON / YAML</p>
+                <h2>Analyze infrastructure from local files or pasted source</h2>
+              </div>
+              <div class="status-pill" id="detectedType">No input</div>
+            </div>
+
+            <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose Terraform, JSON, or YAML files from this device">
+              <input type="file" id="fileInput" hidden multiple accept=".tf,.tf.json,.json,.yaml,.yml" />
+              <div>
+                <strong>Choose or drop infrastructure files</strong>
+                <span>Supports Terraform (.tf / .tf.json), JSON, YAML, and YML. Multiple Terraform or YAML files can be selected together.</span>
+              </div>
+            </div>
+            <div class="import-file-summary" id="importFileSummary" aria-live="polite">No files selected.</div>
+
+            <textarea id="importInput" class="code-editor tall" spellcheck="false" placeholder="Paste Terraform HCL, terraform show -json plan/state, CloudFormation JSON/YAML, Kubernetes YAML, or a normalized Sable snapshot..."></textarea>
+
+            <p class="analysis-accuracy-note" id="analysisAccuracyNote">For authoritative Terraform analysis, import JSON produced by terraform show -json from a plan or state. Raw .tf uses static HCL analysis and is clearly marked as non-authoritative.</p>
+
+            <div class="editor-actions stacked-mobile">
+              <button class="secondary-button" id="chooseImportFilesBtn" type="button">Import infrastructure</button>
+              <button class="ghost-button" id="clearImportBtn" type="button">Clear</button>
+              <button class="primary-button" id="analyzeImportBtn" type="button">Analyze workspace</button>
+            </div>
+          </section>
+
+          <aside class="panel import-preview-panel">
+            <div class="panel-header compact">
+              <div>
+                <p class="eyebrow">Preview</p>
+                <h2>Parsed output</h2>
+              </div>
+            </div>
+            <div class="preview-stats">
+              <div><strong id="previewResourceCount">0</strong><span>Resources</span></div>
+              <div><strong id="previewFindingCount">0</strong><span>Findings</span></div>
+              <div><strong id="previewCategoryCount">0</strong><span>Categories</span></div>
+            </div>
+            <pre class="json-preview" id="jsonPreview">No parsed output yet.</pre>
+            <button class="secondary-button full" id="downloadSnapshotBtn">Download normalized snapshot</button>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <template id="findingTemplate">
+    <article class="finding-card">
+      <div class="finding-topline">
+        <span class="severity-pill"></span>
+        <span class="finding-resource"></span>
+      </div>
+      <h3></h3>
+      <p></p>
+      <div class="recommendation"></div>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+  <script src="features.js"></script>
+</body>
+</html>
