@@ -1,8 +1,28 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
+  "redirects": [
     {
       "source": "/",
+      "destination": "/infrastructure-posture",
+      "permanent": false
+    },
+    {
+      "source": "/index.html",
+      "destination": "/infrastructure-posture",
+      "permanent": true
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/infrastructure-posture",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/terraform-pr-reviewer",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/import-infrastructure",
       "destination": "/index.html"
     }
   ]

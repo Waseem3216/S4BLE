@@ -9,6 +9,31 @@ const CIRCLE_LENGTH = 302;
 const ZOOM_MIN = 0.35;
 const ZOOM_MAX = 2.2;
 const ZOOM_STEP = 0.05;
+
+const APP_ROUTES = Object.freeze({
+  overview: {
+    path: '/infrastructure-posture',
+    eyebrow: 'Cloud Infrastructure Review',
+    heading: 'Infrastructure Posture Overview',
+    title: 'Infrastructure Posture | S4BLE'
+  },
+  reviewer: {
+    path: '/terraform-pr-reviewer',
+    eyebrow: 'Pull Request Risk Review',
+    heading: 'Terraform PR Risk Reviewer',
+    title: 'Terraform PR Risk Reviewer | S4BLE'
+  },
+  importer: {
+    path: '/import-infrastructure',
+    eyebrow: 'Workspace Import',
+    heading: 'Import Terraform / JSON / YAML',
+    title: 'Import Infrastructure | S4BLE'
+  }
+});
+
+const ROUTE_BY_PATH = Object.freeze(Object.fromEntries(
+  Object.entries(APP_ROUTES).map(([route, config]) => [config.path, route])
+));
 const MAX_INFRA_FILES = 100;
 const MAX_INFRA_BYTES = 7_000_000;
 const SUPPORTED_INFRA_EXTENSIONS = ['.tf', '.tf.json', '.json', '.yaml', '.yml'];
@@ -100,6 +125,7 @@ async function init() {
   beginSableLoader();
   applyTheme(activeTheme);
   bindNavigation();
+  initializeRouteFromLocation();
   bindThemeControls();
   bindImportPage();
   bindOverviewPage();
@@ -127,6 +153,24 @@ function bindNavigation() {
     button.addEventListener('click', openInfrastructureFilePicker);
   });
   $('#exportMarkdownBtn').addEventListener('click', exportWorkspaceReport);
+  window.addEventListener('popstate', () => {
+    const route = routeFromPath(window.location.pathname);
+    navigate(route, { historyMode: 'none' });
+  });
+}
+
+function routeFromPath(pathname = window.location.pathname) {
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+  if (normalized === '/' || normalized === '/index.html') return 'overview';
+  return ROUTE_BY_PATH[normalized] || 'overview';
+}
+
+function initializeRouteFromLocation() {
+  const route = routeFromPath(window.location.pathname);
+  const canonicalPath = APP_ROUTES[route].path;
+  navigate(route, {
+    historyMode: window.location.pathname === canonicalPath ? 'none' : 'replace'
+  });
 }
 
 
@@ -413,24 +457,35 @@ function bindReviewerPage() {
   $('#prFileInput').addEventListener('change', event => handleFilesSelect(event.target.files, $('#prInput'), reviewPrRisk, 'review'));
 }
 
-function navigate(route) {
+function navigate(route, { historyMode = 'push' } = {}) {
+  const config = APP_ROUTES[route] || APP_ROUTES.overview;
+  const resolvedRoute = APP_ROUTES[route] ? route : 'overview';
+
   if ($('#architecturePanel')?.classList.contains('maximized')) toggleArchitectureMaximized(false);
-  const titles = {
-    overview: ['Cloud Infrastructure Review', 'Infrastructure Posture Overview'],
-    reviewer: ['Pull Request Risk Review', 'Terraform PR Risk Reviewer'],
-    importer: ['Workspace Import', 'Import Terraform / JSON / YAML']
-  };
+
   $$('.nav-item').forEach(item => {
-    const active = item.dataset.route === route;
+    const active = item.dataset.route === resolvedRoute;
     item.classList.toggle('active', active);
     if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
   });
+
   $$('.page').forEach(page => page.classList.remove('active'));
-  $(`#${route}Page`).classList.add('active');
-  $('#routeEyebrow').textContent = titles[route][0];
-  $('#routeTitle').textContent = titles[route][1];
+  $(`#${resolvedRoute}Page`)?.classList.add('active');
+  $('#routeEyebrow').textContent = config.eyebrow;
+  $('#routeTitle').textContent = config.heading;
+  document.title = config.title;
+
+  if (historyMode !== 'none') {
+    const nextUrl = `${config.path}${window.location.search}${window.location.hash}`;
+    if (historyMode === 'replace') {
+      window.history.replaceState({ route: resolvedRoute }, '', nextUrl);
+    } else if (window.location.pathname !== config.path) {
+      window.history.pushState({ route: resolvedRoute }, '', nextUrl);
+    }
+  }
+
   requestAnimationFrame(() => {
-    const activeNav = $(`.nav-item[data-route="${route}"]`);
+    const activeNav = $(`.nav-item[data-route="${resolvedRoute}"]`);
     if (activeNav && window.innerWidth <= 940) {
       activeNav.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
     }

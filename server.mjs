@@ -30,11 +30,18 @@ app.use(helmet({
 
 app.use(express.json({ limit: '8mb' }));
 
-// Vercel sends `/` to the Express function. The browser-facing HTML lives in
-// public/index.html, which Vercel serves from its CDN as `/index.html`.
-// Redirecting here is a safe fallback if the edge rewrite is ever bypassed.
-app.get('/', (_req, res) => {
-  if (isVercel) return res.redirect(302, '/index.html');
+// Keep browser-facing URLs product-oriented instead of exposing index.html.
+const browserRoutes = new Set([
+  '/infrastructure-posture',
+  '/terraform-pr-reviewer',
+  '/import-infrastructure'
+]);
+
+app.get(['/', '/index.html'], (_req, res) => {
+  return res.redirect(302, '/infrastructure-posture');
+});
+
+app.get([...browserRoutes], (_req, res) => {
   return res.sendFile(path.join(publicDir, 'index.html'));
 });
 
