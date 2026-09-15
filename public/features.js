@@ -698,10 +698,11 @@
     if (!findings.length) return '<div class="iv-empty">No findings detected for this resource in the imported scope.</div>';
     return `<div class="iv-drawer-list">${findings.map(finding => `
       <article class="iv-finding-detail">
-        <div><span class="severity-pill ${esc(finding.severity)}">${esc(finding.severity)}</span><small>${esc(finding.confidence || 'confirmed')}</small></div>
+        <div><span class="severity-pill ${esc(finding.severity)}">${esc(finding.severity)}</span><small>${esc(finding.confidence || 'confirmed')}${finding.kind ? ` · ${esc(finding.kind)}` : ''}</small></div>
         <h3>${esc(finding.title)}</h3>
         <p>${esc(finding.description)}</p>
         <strong>Recommendation</strong><p>${esc(finding.recommendation)}</p>
+        ${finding.limitations ? `<strong>Analysis limitation</strong><p>${esc(finding.limitations)}</p>` : ''}
         <div class="iv-control-context"><span>Control context, not certification:</span>${controlContext(finding).map(item => `<em>${esc(item)}</em>`).join('')}</div>
       </article>`).join('')}</div>`;
   }
@@ -1131,25 +1132,29 @@
     const inferred = currentAnalysis.graph?.inferredLinks?.length || 0;
     const diagnosticItems = currentAnalysis.diagnostics || [];
     const unresolved = diagnosticItems.filter(item => /unsupported|unknown|unresolved|failed|missing/i.test(`${item.code || ''} ${item.message || ''}`)).length;
-    const authority = currentAnalysis.metadata?.authoritative ? 'Authoritative for imported scope' : resources.length ? 'Static source analysis' : 'No analysis yet';
+    const evidenceLevel = currentAnalysis.metadata?.evidenceLevel || (currentAnalysis.metadata?.machineReadable ? 'machine-readable' : resources.length ? 'declaration-only' : 'none');
     const providers = (currentAnalysis.metadata?.providersDetected || []).join(', ') || 'None detected';
+    const coverage = currentAnalysis.metadata?.coverage || {};
+    const coverageLabel = resources.length ? `${coverage.supportedResources ?? 0}/${coverage.postureResourceCount ?? coverage.importedResources ?? resources.length} (${coverage.supportedPercent ?? 0}%)` : '—';
     const baseline = readBaseline();
 
     summary.innerHTML = [
       ['Resources', resources.length],
       ['Confirmed links', confirmed],
       ['Findings', currentAnalysis.findings?.length || 0],
-      ['Evidence mode', authority]
+      ['Rule coverage', coverageLabel]
     ].map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
 
     grid.innerHTML = [
       ['Resources', resources.length], ['Confirmed links', confirmed], ['Inferred links', inferred], ['Findings', currentAnalysis.findings?.length || 0],
-      ['Diagnostics', diagnosticItems.length], ['Unresolved / unsupported', unresolved], ['Analysis mode', currentAnalysis.metadata?.analysisMode || 'empty'], ['Providers', providers]
+      ['Rule coverage', coverageLabel], ['Diagnostics', diagnosticItems.length], ['Analysis mode', currentAnalysis.metadata?.analysisMode || 'empty'], ['Evidence level', evidenceLevel], ['Providers', providers]
     ].map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
 
     diagnostics.innerHTML = `
       <p><strong>Scope:</strong> ${esc(currentAnalysis.metadata?.scope || 'none')}</p>
-      <p><strong>Authority:</strong> ${esc(authority)}</p>
+      <p><strong>Evidence level:</strong> ${esc(evidenceLevel)}</p>
+      <p><strong>Live runtime verified:</strong> ${currentAnalysis.metadata?.runtimeVerified ? 'Yes' : 'No'}</p>
+      <p><strong>Rule coverage:</strong> ${esc(coverageLabel)}. ${esc(coverage.note || '')}</p>
       <p><strong>Relationship policy:</strong> ${esc(currentAnalysis.metadata?.relationshipPolicy || 'Confirmed links come from imported evidence; inferred links are separate.')}</p>
       ${diagnosticItems.length ? `<ul>${diagnosticItems.map(item => `<li class="${esc(item.level || 'info')}"><strong>${esc(item.code || item.level || 'diagnostic')}</strong> ${esc(item.message || '')}</li>`).join('')}</ul>` : '<p>No parser diagnostics were reported.</p>'}`;
 

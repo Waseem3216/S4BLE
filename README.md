@@ -1,6 +1,6 @@
-# Sable 3.2
+# S4BLE 3.3
 
-Sable is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.
+S4BLE is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.
 
 ## Production analysis service
 
@@ -142,9 +142,7 @@ Only supplied relationships are considered confirmed.
 Sable no longer silently fabricates an architecture graph.
 
 - **Confirmed** edges are sourced from Terraform expressions, CloudFormation references, Kubernetes selectors/references, or explicit snapshot relationships.
-- **Inferred** edges are returned separately and rendered with dashed, lower-emphasis lines. They are never presented as confirmed facts.
-
-The optional inferred graph is intentionally conservative and exists to help exploration, not to replace evidence.
+- **Inferred** edges are not currently created by the built-in analyzer. S4BLE prefers an incomplete graph over a fabricated relationship when no resource-specific reference, selector, or explicit relationship exists.
 
 ## Findings
 
@@ -160,20 +158,22 @@ Findings include:
 
 Rules currently cover evidence-backed examples across AWS, Azure, GCP, and Kubernetes, including public sensitive ports, public database endpoint configuration, explicitly disabled encryption/backups, wildcard IAM, and privileged Kubernetes workloads.
 
-Sable avoids converting an absent property into a failure when provider defaults or out-of-scope controls could make the conclusion uncertain.
+S4BLE avoids converting an absent property into a failure when provider defaults or out-of-scope controls could make the conclusion uncertain.
 
-## Posture score
+## Evidence score
 
-The score displayed in the UI is an **Sable evidence-weighted posture score**, not an AWS/Azure/GCP certification score.
+The UI now reports an **S4BLE Evidence Score**, a triage index over explicit findings produced by built-in rule families. It is deliberately **not** presented as a compliance percentage, cloud-security certification, penetration-test result, or proof that an environment is secure.
 
-Current weights:
+Key scoring behavior:
 
-- Critical: 20
-- High: 10
-- Medium: 5
-- Low: 2
+- Critical/high findings have greater impact than medium/low findings.
+- Confidence and finding type affect score impact.
+- Availability/context advisories can be shown without materially lowering the score.
+- Repeated instances of the same rule use diminishing penalty, so a larger environment is not automatically rated worse merely because it contains more resources.
+- If no built-in rule family applies to the imported managed resources, the score is `null` / **Not rated** rather than a misleading 100.
+- The API returns `analysis.metadata.coverage` and `analysis.metadata.scoreModel` so users can see what was actually assessed.
 
-Lower-confidence findings receive reduced weight. The exact model is returned in `analysis.metadata.scoreModel` and exported reports so the score is auditable rather than opaque.
+This score is intended to prioritize review work, not replace provider-native validation, runtime testing, architecture review, or organization-specific controls.
 
 ## PR reviewer
 
@@ -251,7 +251,7 @@ The topology panel intentionally stays compact in the normal dashboard so very l
 
 The interface adds production-oriented layout constraints for dense infrastructure workspaces. Large architecture graphs are contained in a bounded preview, expand into a focused inspection workspace, and support local pan/zoom without changing page dimensions. The responsive navigation, toolbars, findings, inventories, long labels, and relationship rows have also been hardened against clipping and overlap. See `UI_FIXES.md` for the validation summary.
 
-## Sable 3.2: infrastructure intelligence
+## S4BLE 3.3: infrastructure intelligence
 
 Version 3.1 keeps analysis request/response based. Optional browser preferences use `localStorage`:
 
@@ -331,3 +331,7 @@ Resource notes are optional and are saved only in browser `localStorage`. They a
 
 ## Loader mascot update
 The loading screen now uses `assets/sable-runner-motion-hardhat.webp`, a four-frame running sable animation with a construction hard hat. The original runner asset remains in `assets/` as a fallback/source reference.
+
+## Accuracy and analysis contract
+
+See [`ACCURACY_AND_ANALYSIS.md`](./ACCURACY_AND_ANALYSIS.md) for the exact evidence model, rule coverage, known limits, and what S4BLE can and cannot truthfully conclude from each input format.

@@ -39,7 +39,7 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'Sable analysis engine', version: '3.2.2' });
+  res.json({ ok: true, service: 'S4BLE analysis engine', version: '3.3.0' });
 });
 
 app.post('/api/analyze', async (req, res) => {
@@ -95,11 +95,11 @@ export default app;
 // Vercel owns the server lifecycle. Only open a local listener outside Vercel.
 if (!isVercel) {
   const server = app.listen(PORT, HOST, () => {
-    console.log(`Sable running on http://${HOST}:${PORT}`);
+    console.log(`S4BLE running on http://${HOST}:${PORT}`);
   });
 
   const shutdown = signal => {
-    console.log(`${signal} received; shutting down Sable.`);
+    console.log(`${signal} received; shutting down S4BLE.`);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 10_000).unref();
   };

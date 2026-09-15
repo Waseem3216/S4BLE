@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>s4ble</title>
+  <title>Sable | Cloud Architecture Analysis and Terraform Risk Review</title>
   <meta name="theme-color" content="#17191f" />
   <meta name="description" content="Sable is a browser-based cloud architecture analyzer, Terraform PR reviewer, and infrastructure import workspace." />
   <link rel="icon" type="image/x-icon" href="assets/sable-favicon.ico" />
@@ -13,7 +13,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body data-theme="light" class="loading">
-  <div class="sable-loader" id="sableLoader" role="status" aria-live="polite" aria-label="Loading Sable workspace">
+  <div class="sable-loader" id="sableLoader" role="status" aria-live="polite" aria-label="Loading S4BLE workspace">
     <div class="sable-loader__inner">
       <div class="sable-loader__animal-stage" id="sableLoaderStage" aria-hidden="true">
         <div class="sable-loader__runner" id="sableLoaderRunner" role="img" aria-label="Running sable wearing a construction hard hat">
@@ -29,7 +29,7 @@
           <span class="sable-loader__progress-fill" id="sableLoaderBar"></span>
         </div>
       </div>
-      <div class="sable-loader__wordmark">s4ble</div>
+      <div class="sable-loader__wordmark"><img src="assets/s4ble-wordmark-script.png?v=2" alt="S4ble" /></div>
       <div class="sable-loader__status" id="sableLoaderStatus">Loading workspace…</div>
       <div class="sable-loader__percent" id="sableLoaderPercent">0%</div>
     </div>
@@ -41,9 +41,9 @@
         <div class="brand-mark" aria-hidden="true">
           <img src="assets/sable-brand-logo-source.png" alt="" />
         </div>
-        <div>
-          <strong>s4ble</strong>
-          <span>Cloud Infrastructure Workspace</span>
+        <div class="brand-copy">
+          <img class="brand-wordmark" src="assets/s4ble-brand-wordmark.png" alt="S4ble" />
+          <span>Infrastructure Workspace</span>
         </div>
       </div>
 
@@ -102,11 +102,11 @@
         <div class="hero-grid">
           <article class="hero-card">
             <div>
-              <p class="eyebrow">Sable Posture Score</p>
+              <p class="eyebrow">S4BLE Evidence Score</p>
               <h2><span id="healthScore">—</span><small>/100</small></h2>
-              <p id="healthNarrative">Import Terraform, JSON, or YAML to calculate an evidence-based posture score.</p>
+              <p id="healthNarrative">Import Terraform, JSON, or YAML to run evidence-backed infrastructure checks.</p>
             </div>
-            <div class="score-ring" aria-label="Sable evidence-based posture score">
+            <div class="score-ring" aria-label="S4BLE evidence score">
               <svg viewBox="0 0 120 120" role="img">
                 <circle cx="60" cy="60" r="48" class="ring-bg"></circle>
                 <circle cx="60" cy="60" r="48" class="ring-progress" id="scoreRing"></circle>
@@ -329,7 +329,7 @@
 
             <textarea id="importInput" class="code-editor tall" spellcheck="false" placeholder="Paste Terraform HCL, terraform show -json plan/state, CloudFormation JSON/YAML, Kubernetes YAML, or a normalized Sable snapshot..."></textarea>
 
-            <p class="analysis-accuracy-note" id="analysisAccuracyNote">For authoritative Terraform analysis, import JSON produced by terraform show -json from a plan or state. Raw .tf uses static HCL analysis and is clearly marked as non-authoritative.</p>
+            <p class="analysis-accuracy-note" id="analysisAccuracyNote">For the strongest Terraform evidence, import JSON produced by terraform show -json from a saved plan. Static source analysis cannot prove live cloud reachability, drift, or organization/account controls.</p>
 
             <div class="editor-actions stacked-mobile">
               <button class="secondary-button" id="chooseImportFilesBtn" type="button">Import infrastructure</button>

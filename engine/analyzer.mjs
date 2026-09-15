@@ -1,9 +1,13 @@
 import yaml from 'js-yaml';
 import { parse as parseHcl } from '@cdktf/hcl2json';
 
-const SEVERITY_WEIGHT = { critical: 20, high: 10, medium: 5, low: 2 };
-const CONFIDENCE_WEIGHT = { confirmed: 1, high: 0.9, medium: 0.7, low: 0.45, inferred: 0.35 };
-const SENSITIVE_PORTS = new Set([22, 3389, 3306, 5432, 6379, 9200, 27017]);
+const SEVERITY_WEIGHT = { critical: 35, high: 18, medium: 8, low: 3 };
+const CONFIDENCE_WEIGHT = { confirmed: 1, high: 0.85, medium: 0.6, low: 0.35, inferred: 0.2 };
+const FINDING_KIND_WEIGHT = { exposure: 1, privilege: 1, data_protection: 0.9, hardening: 0.55, availability: 0.35, operational: 0.4 };
+const ADMIN_PORTS = new Set([22, 3389]);
+const DATA_PORTS = new Set([3306, 5432, 6379, 9200, 9300, 27017, 27018, 1433, 1521, 9042]);
+const SENSITIVE_PORTS = new Set([...ADMIN_PORTS, ...DATA_PORTS]);
+const PRIVILEGED_IAM_SERVICES = new Set(['iam', 'kms', 'organizations', 'sts', 'secretsmanager', 'ssm']);
 
 const CATEGORY_META = {
   network: { label: 'Network Edge', order: 1 },
@@ -37,9 +41,24 @@ export async function reviewRequest(body) {
     if (key in acc) acc[key] += 1;
     return acc;
   }, { add: 0, change: 0, delete: 0 });
-  const riskScore = calculatePrRisk(result.analysis.findings, diffs);
-  const decision = approvalDecision(riskScore, result.analysis.findings, diffs);
-  return { ...result, review: { diffs, counts, riskScore, decision } };
+
+  const reviewDelta = buildReviewFindingDelta(result, diffs, baselineResources);
+  const riskScore = calculatePrRisk(reviewDelta.introduced, diffs);
+  const decision = approvalDecision(riskScore, reviewDelta.introduced, diffs);
+  return {
+    ...result,
+    review: {
+      diffs,
+      counts,
+      riskScore,
+      decision,
+      findings: reviewDelta.all,
+      introducedFindings: reviewDelta.introduced,
+      existingFindings: reviewDelta.existing,
+      resolvedFindings: reviewDelta.resolved,
+      scoreModel: 'Change risk is based on findings introduced by added/changed/replaced resources plus destructive or sensitive resource actions. Pre-existing unchanged findings do not increase PR risk.'
+    }
+  };
 }
 
 function normalizeFiles(files, text, filename) {
@@ -72,14 +91,14 @@ function detectType(text, files) {
   if (/^\s*(apiVersion|kind|Resources|AWSTemplateFormatVersion|workspace|resources)\s*:/m.test(primary)) return 'yaml';
   if (/\b(resource|module|data|terraform|provider|variable|locals|output)\s+(?:"|\{)/.test(primary)) return 'terraform';
   if (/Terraform will perform the following actions|Plan:\s*\d+\s+to add/i.test(primary)) {
-    throw new Error('Human-readable Terraform plan output is not a stable machine interface. Generate an authoritative plan JSON with: terraform show -json tfplan > plan.json');
+    throw new Error('Human-readable Terraform plan output is not a stable machine interface. Generate machine-readable plan JSON with: terraform show -json tfplan > plan.json');
   }
   return 'terraform';
 }
 
 function emptyWorkspace() {
   return {
-    workspace: 'Empty workspace', sourceType: 'empty', analysisMode: 'empty', authoritative: false,
+    workspace: 'Empty workspace', sourceType: 'empty', analysisMode: 'empty', authoritative: false, evidenceLevel: 'none', runtimeVerified: false,
     importedAt: new Date().toISOString(), resources: [], explicitLinks: [], inferredLinks: [], diagnostics: [], changes: []
   };
 }
@@ -111,7 +130,11 @@ function parseTerraformShowJson(doc) {
     const entry = {
       action,
       resource: change.address,
+      address: change.address,
       type: change.type,
+      name: change.name || nameFromAddress(change.address),
+      provider: providerFromType(change.type),
+      providerName: change.provider_name || null,
       description: `Terraform plan actions: ${actions.join(', ') || 'no-op'}.`,
       before: redactSensitive(change?.change?.before, change?.change?.before_sensitive),
       after: redactSensitive(change?.change?.after, change?.change?.after_sensitive)
@@ -125,21 +148,25 @@ function parseTerraformShowJson(doc) {
 
   const explicitLinks = collectTerraformConfigurationLinks(doc.configuration, resources);
   const mode = doc.planned_values || doc.resource_changes ? 'terraform-plan-json' : 'terraform-state-json';
+  const evidenceLevel = mode === 'terraform-plan-json' ? 'planned-values' : 'state-snapshot';
   diagnostics.push({
-    level: 'info', code: 'terraform-json-authoritative',
-    message: 'Terraform machine-readable JSON detected. Resource values and declared expression references are treated as authoritative for this Terraform workspace.'
+    level: 'info', code: 'terraform-json-machine-readable',
+    message: mode === 'terraform-plan-json'
+      ? 'Terraform machine-readable plan JSON detected. Planned values, resource instances, and resource change actions are high-confidence evidence for this plan.'
+      : 'Terraform machine-readable state JSON detected. Values are evidence from the supplied state snapshot; Sable does not claim that state is drift-free or identical to live cloud state.'
   });
-  if (doc.planned_values) {
+  if (doc.planned_values || doc.values || doc.prior_state) {
     diagnostics.push({
       level: 'warning', code: 'terraform-sensitive-json',
-      message: 'Terraform show -json can contain sensitive values. Sable redacts fields marked sensitive by Terraform before returning analysis data.'
+      message: 'Terraform JSON can contain sensitive values. Sable redacts fields marked sensitive by Terraform before returning analysis data.'
     });
   }
   return {
     workspace: doc.terraform_version ? `Terraform ${doc.terraform_version} workspace` : 'Terraform workspace',
-    sourceType: 'terraform-json', analysisMode: mode, authoritative: true,
+    sourceType: 'terraform-json', analysisMode: mode, authoritative: false, machineReadable: true, evidenceLevel,
+    runtimeVerified: false,
     importedAt: new Date().toISOString(), resources: dedupeById(resources), explicitLinks, inferredLinks: [], diagnostics, changes,
-    scope: 'terraform-workspace'
+    scope: mode === 'terraform-plan-json' ? 'terraform-plan' : 'terraform-state-snapshot'
   };
 }
 
@@ -219,7 +246,7 @@ function qualifyTerraformAddress(address, modulePrefix) {
 
 function resolveTerraformResourceAddress(ref, ids, targetAddress = '') {
   const clean = String(ref || '').replace(/^\$\{?|\}?$/g, '');
-  if (!clean || /^(var|local|path|terraform|data)\./.test(clean)) return null;
+  if (!clean || /^(var|local|path|terraform)\./.test(clean)) return null;
   const targetModule = String(targetAddress).split('.').slice(0, -2).join('.');
   const candidates = Array.from(ids).sort((a, b) => b.length - a.length);
   for (const id of candidates) {
@@ -249,7 +276,7 @@ async function parseTerraformSource(files) {
   const deduped = dedupeById(resources);
   const ids = new Set(deduped.map(resource => resource.id));
   for (const resource of deduped) {
-    const refs = extractTerraformRefs(resource.attributes);
+    const refs = extractTerraformRefs(resource.attributes, ids);
     for (const ref of refs) {
       const source = resolveTerraformResourceAddress(ref, ids, resource.id);
       if (source && source !== resource.id) explicitLinks.push({
@@ -260,7 +287,7 @@ async function parseTerraformSource(files) {
   }
   diagnostics.push({
     level: 'warning', code: 'terraform-static-mode',
-    message: 'Raw .tf source is parsed with an HCL2 parser, but expressions, variables, for_each/count instances, provider defaults, remote modules, and runtime unknowns are not fully evaluated. For authoritative values and resource instances, import terraform show -json output from a plan or state.'
+    message: 'Raw .tf source is parsed with an HCL2 parser, but expressions, variables, for_each/count instances, provider defaults, remote modules, and runtime unknowns are not fully evaluated. For evaluated planned/state values and resource instances, import terraform show -json output from a plan or state.'
   });
   if (containsModuleBlocks(files)) diagnostics.push({
     level: 'warning', code: 'terraform-modules-unresolved',
@@ -269,37 +296,48 @@ async function parseTerraformSource(files) {
   return {
     workspace: files.length > 1 ? 'Terraform source workspace' : (files[0]?.name || 'Terraform source'),
     sourceType: 'terraform-hcl', analysisMode: 'terraform-static-source', authoritative: false,
+    evidenceLevel: 'declaration-only', runtimeVerified: false,
     importedAt: new Date().toISOString(), resources: deduped, explicitLinks: dedupeLinks(explicitLinks), inferredLinks: [], diagnostics, changes: [], scope: 'provided-source-files'
   };
 }
 
 function collectHclResources(doc, fileName, resources) {
-  const resourceRoot = doc?.resource || {};
-  for (const [type, names] of Object.entries(resourceRoot)) {
-    for (const [name, blocks] of Object.entries(names || {})) {
-      const entries = Array.isArray(blocks) ? blocks : [blocks];
-      entries.forEach((attrs, index) => {
-        const id = `${type}.${name}${entries.length > 1 ? `[${index}]` : ''}`;
-        resources.push(normalizeResource({
-          id, address: id, type, name, provider: providerFromType(type), category: classifyType(type),
-          attributes: attrs || {}, action: 'present', source: { kind: 'terraform-hcl', file: fileName, address: id }
-        }));
-      });
+  const collect = (root, mode, prefix = '') => {
+    for (const [type, names] of Object.entries(root || {})) {
+      for (const [name, blocks] of Object.entries(names || {})) {
+        const entries = Array.isArray(blocks) ? blocks : [blocks];
+        entries.forEach((attrs, index) => {
+          const base = `${prefix}${type}.${name}`;
+          const id = `${base}${entries.length > 1 ? `[${index}]` : ''}`;
+          resources.push(normalizeResource({
+            id, address: id, mode, type, name, provider: providerFromType(type), category: classifyType(type),
+            attributes: attrs || {}, action: 'present', source: { kind: 'terraform-hcl', file: fileName, address: id }
+          }));
+        });
+      }
     }
-  }
+  };
+  collect(doc?.resource, 'managed');
+  collect(doc?.data, 'data', 'data.');
 }
 
 function containsModuleBlocks(files) {
   return files.some(file => /(^|\n)\s*module\s+"/m.test(file.content));
 }
 
-function extractTerraformRefs(value) {
+function extractTerraformRefs(value, ids = new Set()) {
   const refs = new Set();
+  const knownIds = Array.from(ids || []).sort((a, b) => b.length - a.length);
   const visit = item => {
     if (item == null) return;
     if (typeof item === 'string') {
-      const regex = /(?:module\.[A-Za-z0-9_-]+\.)*(?:aws|azurerm|google|kubernetes)_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\[[^\]]+\])?/g;
-      for (const match of item.matchAll(regex)) refs.add(match[0]);
+      for (const id of knownIds) {
+        const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(^|[^A-Za-z0-9_-])(${escaped})(?=($|[.\\[]))`, 'g');
+        if (regex.test(item)) refs.add(id);
+      }
+      const generic = /(?:module\.[A-Za-z0-9_-]+\.)*(?:[A-Za-z][A-Za-z0-9_-]*_[A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+(?:\[[^\]]+\])?/g;
+      for (const match of item.matchAll(generic)) refs.add(match[0]);
       return;
     }
     if (Array.isArray(item)) return item.forEach(visit);
@@ -364,8 +402,8 @@ function parseCloudFormation(doc, sourceType) {
   }
   return {
     workspace: doc.Description || 'CloudFormation stack', sourceType: `cloudformation-${sourceType}`,
-    analysisMode: 'declarative-template', authoritative: true, importedAt: new Date().toISOString(),
-    resources, explicitLinks: dedupeLinks(links), inferredLinks: [], diagnostics: [{ level: 'info', code: 'cloudformation-template', message: 'CloudFormation template parsed with intrinsic reference tracking. Runtime values not present in the template are not invented.' }], changes: [], scope: 'provided-template'
+    analysisMode: 'declarative-template', authoritative: false, evidenceLevel: 'declaration-only', runtimeVerified: false, importedAt: new Date().toISOString(),
+    resources, explicitLinks: dedupeLinks(links), inferredLinks: [], diagnostics: [{ level: 'info', code: 'cloudformation-template', message: 'CloudFormation template declarations and intrinsic references were parsed. Deployment-time transforms, account controls, stack parameters not present here, and live resource state are outside this analysis.' }], changes: [], scope: 'provided-template'
   };
 }
 
@@ -405,8 +443,8 @@ function parseKubernetesDocuments(docs, sourceType) {
   });
   const links = buildKubernetesLinks(resources);
   return {
-    workspace: 'Kubernetes manifests', sourceType: `kubernetes-${sourceType}`, analysisMode: 'declarative-manifest', authoritative: true,
-    importedAt: new Date().toISOString(), resources, explicitLinks: links, inferredLinks: [], diagnostics: [{ level: 'info', code: 'kubernetes-manifest', message: 'Kubernetes manifests parsed structurally. Service selectors, workload references, ingress backends, volumes, and service accounts are linked when declared.' }], changes: [], scope: 'provided-manifests'
+    workspace: 'Kubernetes manifests', sourceType: `kubernetes-${sourceType}`, analysisMode: 'declarative-manifest', authoritative: false, evidenceLevel: 'declaration-only', runtimeVerified: false,
+    importedAt: new Date().toISOString(), resources, explicitLinks: links, inferredLinks: [], diagnostics: [{ level: 'info', code: 'kubernetes-manifest', message: 'Kubernetes manifests were parsed structurally. Admission mutations, cluster defaults, controllers, runtime network policy, and live workload state are outside this analysis unless explicitly present in the manifests.' }], changes: [], scope: 'provided-manifests'
   };
 }
 
@@ -417,7 +455,17 @@ function buildKubernetesLinks(resources) {
     const doc = r.attributes || {};
     byKindNameNs.set(`${doc.kind}:${doc.metadata?.namespace || 'default'}:${doc.metadata?.name}`, r.id);
   }
-  const workloads = resources.filter(r => /deployment|stateful_set|daemon_set|pod|job|cron_job/.test(r.type));
+  const add = (source, target, label, evidence) => {
+    if (!source || !target || source === target) return;
+    links.push({ source, target, label, confidence: 'confirmed', evidence });
+  };
+  const workloads = resources.filter(r => /deployment|stateful_set|daemon_set|pod|job|cron_job|replica_set/.test(r.type));
+  const workloadLabels = workload => {
+    const doc = workload.attributes || {};
+    return doc.spec?.template?.metadata?.labels || doc.metadata?.labels || {};
+  };
+  const selectorMatches = (selector, labels) => selector && Object.keys(selector).length && Object.entries(selector).every(([k, v]) => labels[k] === v);
+
   for (const service of resources.filter(r => r.type === 'kubernetes_service')) {
     const doc = service.attributes;
     const selector = doc.spec?.selector || {};
@@ -426,11 +474,11 @@ function buildKubernetesLinks(resources) {
         const wdoc = workload.attributes;
         const ns = wdoc.metadata?.namespace || 'default';
         if (ns !== (doc.metadata?.namespace || 'default')) continue;
-        const labels = wdoc.spec?.template?.metadata?.labels || wdoc.metadata?.labels || {};
-        if (Object.entries(selector).every(([k, v]) => labels[k] === v)) links.push({ source: service.id, target: workload.id, label: 'Service selector', confidence: 'confirmed', evidence: { selector } });
+        if (selectorMatches(selector, workloadLabels(workload))) add(service.id, workload.id, 'Service selector', { selector });
       }
     }
   }
+
   for (const ingress of resources.filter(r => r.type === 'kubernetes_ingress')) {
     const doc = ingress.attributes;
     const ns = doc.metadata?.namespace || 'default';
@@ -441,29 +489,69 @@ function buildKubernetesLinks(resources) {
     }
     const defaultName = doc.spec?.defaultBackend?.service?.name || doc.spec?.backend?.serviceName;
     if (defaultName) names.push(defaultName);
-    for (const name of names) {
-      const target = byKindNameNs.get(`Service:${ns}:${name}`);
-      if (target) links.push({ source: ingress.id, target, label: 'Ingress backend', confidence: 'confirmed', evidence: { service: name } });
-    }
+    for (const name of names) add(ingress.id, byKindNameNs.get(`Service:${ns}:${name}`), 'Ingress backend', { service: name });
   }
+
   for (const workload of workloads) {
     const doc = workload.attributes;
     const ns = doc.metadata?.namespace || 'default';
     const spec = doc.spec?.template?.spec || doc.spec || {};
-    if (spec.serviceAccountName) {
-      const target = byKindNameNs.get(`ServiceAccount:${ns}:${spec.serviceAccountName}`);
-      if (target) links.push({ source: target, target: workload.id, label: 'Service account', confidence: 'confirmed', evidence: { serviceAccountName: spec.serviceAccountName } });
-    }
+    if (spec.serviceAccountName) add(byKindNameNs.get(`ServiceAccount:${ns}:${spec.serviceAccountName}`), workload.id, 'Service account', { serviceAccountName: spec.serviceAccountName });
+
     for (const volume of spec.volumes || []) {
       const candidates = [
-        ['Secret', volume.secret?.secretName], ['ConfigMap', volume.configMap?.name], ['PersistentVolumeClaim', volume.persistentVolumeClaim?.claimName]
+        ['Secret', volume.secret?.secretName],
+        ['ConfigMap', volume.configMap?.name],
+        ['PersistentVolumeClaim', volume.persistentVolumeClaim?.claimName]
       ];
-      for (const [kind, name] of candidates) {
-        const target = name ? byKindNameNs.get(`${kind}:${ns}:${name}`) : null;
-        if (target) links.push({ source: target, target: workload.id, label: 'Volume/config reference', confidence: 'confirmed', evidence: { kind, name } });
+      for (const [kind, name] of candidates) if (name) add(byKindNameNs.get(`${kind}:${ns}:${name}`), workload.id, 'Volume/config reference', { kind, name });
+    }
+
+    for (const container of [...(spec.containers || []), ...(spec.initContainers || []), ...(spec.ephemeralContainers || [])]) {
+      for (const from of container.envFrom || []) {
+        if (from.secretRef?.name) add(byKindNameNs.get(`Secret:${ns}:${from.secretRef.name}`), workload.id, 'Environment secret reference', { container: container.name, secret: from.secretRef.name });
+        if (from.configMapRef?.name) add(byKindNameNs.get(`ConfigMap:${ns}:${from.configMapRef.name}`), workload.id, 'Environment ConfigMap reference', { container: container.name, configMap: from.configMapRef.name });
+      }
+      for (const env of container.env || []) {
+        if (env.valueFrom?.secretKeyRef?.name) add(byKindNameNs.get(`Secret:${ns}:${env.valueFrom.secretKeyRef.name}`), workload.id, 'Environment secret reference', { container: container.name, variable: env.name, secret: env.valueFrom.secretKeyRef.name });
+        if (env.valueFrom?.configMapKeyRef?.name) add(byKindNameNs.get(`ConfigMap:${ns}:${env.valueFrom.configMapKeyRef.name}`), workload.id, 'Environment ConfigMap reference', { container: container.name, variable: env.name, configMap: env.valueFrom.configMapKeyRef.name });
       }
     }
   }
+
+  for (const hpa of resources.filter(r => r.type === 'kubernetes_horizontal_pod_autoscaler')) {
+    const doc = hpa.attributes || {};
+    const ns = doc.metadata?.namespace || 'default';
+    const ref = doc.spec?.scaleTargetRef;
+    if (ref?.kind && ref?.name) add(hpa.id, byKindNameNs.get(`${ref.kind}:${ns}:${ref.name}`), 'Scale target', { scaleTargetRef: ref });
+  }
+
+  for (const binding of resources.filter(r => /kubernetes_(cluster_)?role_binding$/.test(r.type))) {
+    const doc = binding.attributes || {};
+    const ns = doc.metadata?.namespace || 'default';
+    const roleRef = doc.roleRef;
+    if (roleRef?.kind && roleRef?.name) {
+      const roleNs = roleRef.kind === 'ClusterRole' ? 'default' : ns;
+      add(byKindNameNs.get(`${roleRef.kind}:${roleNs}:${roleRef.name}`), binding.id, 'RBAC role reference', { roleRef });
+    }
+    for (const subject of doc.subjects || []) {
+      if (subject.kind === 'ServiceAccount' && subject.name) {
+        add(byKindNameNs.get(`ServiceAccount:${subject.namespace || ns}:${subject.name}`), binding.id, 'RBAC subject', { subject });
+      }
+    }
+  }
+
+  for (const policy of resources.filter(r => r.type === 'kubernetes_network_policy')) {
+    const doc = policy.attributes || {};
+    const ns = doc.metadata?.namespace || 'default';
+    const selector = doc.spec?.podSelector?.matchLabels || {};
+    for (const workload of workloads) {
+      const wdoc = workload.attributes || {};
+      if ((wdoc.metadata?.namespace || 'default') !== ns) continue;
+      if (selectorMatches(selector, workloadLabels(workload))) add(policy.id, workload.id, 'NetworkPolicy selector', { selector });
+    }
+  }
+
   return dedupeLinks(links);
 }
 
@@ -482,8 +570,8 @@ function parseNormalizedSnapshot(doc, sourceType) {
     label: link.label || 'declared relationship', confidence: link.confidence || 'confirmed', evidence: link.evidence || { source: 'snapshot' }
   })).filter(link => idMap.has(link.source) || resources.some(r => r.id === link.source)).filter(link => idMap.has(link.target) || resources.some(r => r.id === link.target));
   return {
-    workspace: root.workspace || root.name || 'Imported snapshot', sourceType: `snapshot-${sourceType}`, analysisMode: 'normalized-snapshot', authoritative: true,
-    importedAt: new Date().toISOString(), resources, explicitLinks: dedupeLinks(links), inferredLinks: [], diagnostics: [{ level: 'info', code: 'normalized-snapshot', message: 'Normalized snapshot resources are treated as declared facts. Only supplied relationships are shown as confirmed.' }], changes: [], scope: 'provided-snapshot'
+    workspace: root.workspace || root.name || 'Imported snapshot', sourceType: `snapshot-${sourceType}`, analysisMode: 'normalized-snapshot', authoritative: false, evidenceLevel: 'user-supplied', runtimeVerified: false,
+    importedAt: new Date().toISOString(), resources, explicitLinks: dedupeLinks(links), inferredLinks: [], diagnostics: [{ level: 'info', code: 'normalized-snapshot', message: 'Normalized snapshot fields are treated as user-supplied declarations. Sable does not independently verify them against a cloud control plane.' }], changes: [], scope: 'provided-snapshot'
   };
 }
 
@@ -491,24 +579,44 @@ function finalizeAnalysis(workspace, options = {}) {
   const resources = dedupeById((workspace.resources || []).map(normalizeResource));
   const findings = [];
   for (const resource of resources) findings.push(...evaluateResource(resource, resources, workspace));
-  findings.push(...evaluateScopeControls(resources, workspace));
+  const dedupedFindings = dedupeFindings(findings);
   const explicitLinks = dedupeLinks((workspace.explicitLinks || []).filter(link => hasResource(resources, link.source) && hasResource(resources, link.target)));
   const inferredLinks = options.includeInferred ? inferConservativeLinks(resources, explicitLinks) : [];
   const graph = { links: explicitLinks, inferredLinks };
-  const counts = countFindings(findings);
-  const score = calculatePostureScore(findings);
-  const grouped = groupResources(resources, findings);
+  const counts = countFindings(dedupedFindings);
+  const coverage = buildRuleCoverage(resources);
+  const score = calculatePostureScore(dedupedFindings, coverage);
+  const rating = calculatePostureRating(dedupedFindings, coverage);
+  const grouped = groupResources(resources, dedupedFindings);
+  const diagnostics = [...(workspace.diagnostics || [])];
+  if (coverage.unsupportedResources > 0) diagnostics.push({
+    level: 'warning', code: 'partial-rule-coverage',
+    message: `${coverage.unsupportedResources} of ${coverage.importedResources} imported resources do not currently have a built-in posture rule family. They remain available in the architecture map but are not treated as passing security controls.`
+  });
+  if (resources.length && !workspace.runtimeVerified) diagnostics.push({
+    level: 'info', code: 'runtime-state-not-verified',
+    message: 'Sable analyzes the imported artifact. It does not query the live cloud/Kubernetes control plane, so effective runtime reachability, organization/account policies, drift, admission mutations, and external dependencies may differ.'
+  });
+  if (options.includeInferred && inferredLinks.length === 0 && resources.length) diagnostics.push({
+    level: 'info', code: 'no-safe-inferred-relationships',
+    message: 'No inferred architecture edges were added. Sable does not create category-based or name-based relationships without resource-specific evidence.'
+  });
   return {
     workspace: { ...workspace, resources, explicitLinks, inferredLinks },
     analysis: {
-      resources, findings: sortFindings(findings), grouped, counts, score, graph, diagnostics: workspace.diagnostics || [],
+      resources, findings: sortFindings(dedupedFindings), grouped, counts, score, rating, graph, diagnostics,
       metadata: {
         analysisMode: workspace.analysisMode,
         authoritative: Boolean(workspace.authoritative),
+        machineReadable: Boolean(workspace.machineReadable),
+        evidenceLevel: workspace.evidenceLevel || (workspace.authoritative ? 'imported-machine-readable' : 'declaration-only'),
+        runtimeVerified: Boolean(workspace.runtimeVerified),
         scope: workspace.scope,
         providersDetected: Array.from(new Set(resources.map(resource => resource.provider))).sort(),
-        relationshipPolicy: 'Confirmed edges come only from declared/imported evidence. Inferred edges are stored separately and labeled inferred.',
-        scoreModel: 'Sable evidence-weighted posture score: critical 20, high 10, medium 5, low 2; reduced only when a finding is not confirmed. This is not a cloud-provider certification score.'
+        coverage,
+        accuracyContract: 'S4BLE reports only claims supported by the imported artifact. It distinguishes a declared configuration from effective runtime behavior and does not turn missing properties into failures when provider defaults, account policies, module evaluation, admission controls, or live state could change the conclusion.',
+        relationshipPolicy: 'Confirmed edges require explicit imported references/selectors/relationships. S4BLE does not infer generic category-to-category dependencies.',
+        scoreModel: 'S4BLE Evidence Score is a transparent triage index over explicit findings in controls the built-in rule pack can assess. It is not a compliance score, a penetration test, or proof that the deployed environment is secure. Repeated instances of the same rule have diminishing score impact to avoid penalizing larger environments solely for size.'
       }
     }
   };
@@ -525,53 +633,141 @@ function evaluateResource(resource, allResources, workspace) {
   return findings.map(f => ({ ...f, sourceMode: workspace.analysisMode }));
 }
 
-function evaluateAws(resource, allResources) {
+function evaluateAws(resource) {
   const out = [];
   const type = resource.type.toLowerCase();
   const a = resource.attributes || {};
+
   if (/security_group|securitygroup|security_group_rule|security_group_ingress_rule/i.test(type)) {
-    const rules = normalizeSecurityRules(a);
-    for (const rule of rules) {
-      const publicSource = rule.sources.some(isWorldCidr);
-      const ports = expandPortRange(rule.fromPort, rule.toPort);
-      const sensitive = ports.some(port => SENSITIVE_PORTS.has(port));
-      if (publicSource && sensitive) out.push(finding('critical', 'Sensitive port exposed to the internet', resource, 'A declared ingress rule permits a sensitive administrative or database port from a world-routable CIDR.', 'Restrict the source to a private network, VPN, zero-trust access path, or tightly scoped administrative CIDR.', 'confirmed', { attribute: rule.path, value: rule }));
+    for (const rule of normalizeSecurityRules(a, type)) {
+      if (rule.direction !== 'ingress' || !rule.sources.some(isWorldCidr)) continue;
+      if (rule.allPorts) {
+        out.push(finding('S4BLE-AWS-SG-001', 'critical', 'Internet ingress allows all ports/protocols', resource,
+          'The declared ingress rule accepts traffic from a world-routable CIDR and does not restrict the protocol/port range.',
+          'Limit the rule to the exact required protocol, ports, and trusted source ranges.', 'confirmed', { attribute: rule.path, value: rule },
+          { kind: 'exposure', reference: 'AWS VPC security group rules' }));
+        continue;
+      }
+      const adminPorts = Array.from(ADMIN_PORTS).filter(port => ruleIncludesPort(rule, port));
+      if (adminPorts.length) out.push(finding('S4BLE-AWS-SG-002', 'high', 'Administrative port exposed to the internet', resource,
+        `The declared ingress rule permits ${adminPorts.join(', ')} from a world-routable CIDR. This is a property of the security rule; actual host reachability still depends on attachment, routes, and the target resource.`,
+        'Restrict administrative access to a VPN, identity-aware access path, bastion with trusted sources, or tightly scoped CIDRs.', 'confirmed', { attribute: rule.path, value: rule },
+        { kind: 'exposure', limitations: 'A security-group rule alone does not prove that a public route or listening service exists.' }));
+      const dataPorts = Array.from(DATA_PORTS).filter(port => ruleIncludesPort(rule, port));
+      if (dataPorts.length) out.push(finding('S4BLE-AWS-SG-003', 'high', 'Data-service port exposed to the internet', resource,
+        `The declared ingress rule permits data-service port(s) ${dataPorts.join(', ')} from a world-routable CIDR.`,
+        'Use private connectivity and restrict source ranges to the workloads that require access.', 'confirmed', { attribute: rule.path, value: rule },
+        { kind: 'exposure', limitations: 'The rule is public, but actual resource reachability also depends on routing and resource attachment.' }));
     }
   }
-  if (/db_instance|rds|aws::rds::dbinstance/i.test(type)) {
-    const publicValue = firstDefined(a.publicly_accessible, a.PubliclyAccessible);
-    if (publicValue === true) out.push(finding('high', 'Public database endpoint enabled', resource, 'The database is configured to receive a publicly addressable endpoint. This does not by itself prove internet reachability because security groups and routes still apply.', 'Prefer private database endpoints unless public addressing is explicitly required, and verify network policy limits access.', 'confirmed', { attribute: 'publicly_accessible/PubliclyAccessible', value: true }));
-    const encrypted = firstDefined(a.storage_encrypted, a.StorageEncrypted);
-    if (encrypted === false) out.push(finding('high', 'Database storage encryption disabled', resource, 'The declared database storage encryption setting is disabled.', 'Enable provider-supported storage encryption using a managed or customer-managed key.', 'confirmed', { attribute: 'storage_encrypted/StorageEncrypted', value: false }));
-    const backup = firstDefined(a.backup_retention_period, a.BackupRetentionPeriod);
-    if (Number(backup) === 0) out.push(finding('high', 'Automated database backups disabled', resource, 'Backup retention is explicitly set to zero.', 'Set a retention period that meets recovery objectives and regularly test restoration.', 'confirmed', { attribute: 'backup_retention_period/BackupRetentionPeriod', value: backup }));
-    const multiAz = firstDefined(a.multi_az, a.MultiAZ);
-    if (multiAz === false) out.push(finding('medium', 'Multi-AZ database deployment disabled', resource, 'The database is explicitly configured without Multi-AZ high availability.', 'Enable Multi-AZ where workload availability requirements justify it.', 'confirmed', { attribute: 'multi_az/MultiAZ', value: false }));
+
+  const isRdsInstance = /(^|_)db_instance$|rds.*dbinstance|aws::rds::dbinstance/i.test(type);
+  const isRdsCluster = /rds_cluster|aws::rds::dbcluster/i.test(type);
+  if (isRdsInstance || isRdsCluster) {
+    if (isRdsInstance) {
+      const publicValue = scalarValue(firstDefined(a.publicly_accessible, a.PubliclyAccessible));
+      if (publicValue === true) out.push(finding('S4BLE-AWS-RDS-001', 'high', 'Publicly addressable RDS endpoint requested', resource,
+        'Public accessibility is explicitly enabled. AWS can assign a publicly addressable endpoint, but this setting alone does not prove internet reachability because VPC routing and security-group rules still apply.',
+        'Prefer private database connectivity unless public addressing is a documented requirement, and verify that network policy limits access.', 'confirmed', { attribute: 'publicly_accessible/PubliclyAccessible', value: true },
+        { kind: 'exposure', reference: 'Amazon RDS public accessibility' }));
+      const multiAz = scalarValue(firstDefined(a.multi_az, a.MultiAZ));
+      if (multiAz === false) out.push(finding('S4BLE-AWS-RDS-004', 'low', 'RDS Multi-AZ is explicitly disabled', resource,
+        'The database is configured without Multi-AZ high availability. Whether this is a problem depends on the workload availability objective.',
+        'For production workloads that require instance-level high availability, evaluate Multi-AZ or an engine-specific resilient topology.', 'confirmed', { attribute: 'multi_az/MultiAZ', value: false },
+        { kind: 'availability', scoreEligible: false, limitations: 'Single-AZ can be appropriate for development, disposable, or cost-sensitive workloads.' }));
+    }
+    const encrypted = scalarValue(firstDefined(a.storage_encrypted, a.StorageEncrypted));
+    if (encrypted === false) out.push(finding('S4BLE-AWS-RDS-002', 'high', 'RDS storage encryption explicitly disabled', resource,
+      'The imported configuration explicitly sets RDS storage encryption to false.',
+      'Enable RDS encryption at rest for workloads that store persistent data and verify the KMS key policy and recovery process.', 'confirmed', { attribute: 'storage_encrypted/StorageEncrypted', value: false },
+      { kind: 'data_protection' }));
+    const backup = scalarValue(firstDefined(a.backup_retention_period, a.BackupRetentionPeriod));
+    if (backup !== undefined && backup !== null && Number(backup) === 0) out.push(finding('S4BLE-AWS-RDS-003', 'medium', 'RDS automated backups disabled', resource,
+      'The backup retention period is explicitly set to 0, which disables RDS automated backups for DB instances.',
+      'Set a retention period that meets recovery objectives and test restoration. If another backup mechanism is intentionally used, document and verify it.', 'confirmed', { attribute: 'backup_retention_period/BackupRetentionPeriod', value: backup },
+      { kind: 'data_protection', reference: 'Amazon RDS backup retention' }));
+    const deletionProtection = scalarValue(firstDefined(a.deletion_protection, a.DeletionProtection));
+    if (deletionProtection === false) out.push(finding('S4BLE-AWS-RDS-005', 'low', 'RDS deletion protection explicitly disabled', resource,
+      'Deletion protection is explicitly disabled. This does not make deletion imminent, but it removes a provider-side guardrail.',
+      'Enable deletion protection for persistent production databases unless a documented lifecycle process provides equivalent protection.', 'confirmed', { attribute: 'deletion_protection/DeletionProtection', value: false },
+      { kind: 'data_protection', scoreEligible: false }));
+    if (a.skip_final_snapshot === true) out.push(finding('S4BLE-AWS-RDS-006', 'medium', 'Terraform will skip the final RDS snapshot on deletion', resource,
+      'skip_final_snapshot is explicitly true. If Terraform destroys this DB instance, it will not create the final snapshot requested by that Terraform resource setting.',
+      'For persistent data, require a final snapshot or verify an independent backup/recovery process before destructive changes.', 'confirmed', { attribute: 'skip_final_snapshot', value: true },
+      { kind: 'data_protection', scoreWeight: 0.7 }));
   }
-  if (/s3_bucket$|aws::s3::bucket/i.test(type)) {
-    const acl = String(firstDefined(a.acl, a.AccessControl, '')).toLowerCase();
-    if (/public-read|publicread|public-read-write|publicreadwrite/.test(acl)) out.push(finding('critical', 'Public bucket ACL declared', resource, 'The bucket ACL explicitly grants public access.', 'Use private ACLs and tightly scoped bucket policies or signed delivery mechanisms.', 'confirmed', { attribute: 'acl/AccessControl', value: acl }));
+
+  if (/s3_bucket($|_acl)|aws::s3::bucket$/i.test(type)) {
+    const acl = String(scalarValue(firstDefined(a.acl, a.AccessControl, '')) || '').toLowerCase();
+    if (/public-read|publicread|public-read-write|publicreadwrite/.test(acl)) out.push(finding('S4BLE-AWS-S3-001', 'high', 'Public S3 ACL declared', resource,
+      'The imported configuration declares a public bucket ACL. Effective public access can still be blocked by stricter bucket, account, or organization Block Public Access settings.',
+      'Prefer private ACLs and use narrowly scoped bucket policies or CloudFront origin access control when public delivery is required.', 'confirmed', { attribute: 'acl/AccessControl', value: acl },
+      { kind: 'exposure', limitations: 'A public ACL declaration is not proof of effective public access when S3 Block Public Access is enforced at another level.' }));
   }
-  if (/s3_bucket_public_access_block/.test(type)) {
-    const disabled = ['block_public_acls', 'block_public_policy', 'ignore_public_acls', 'restrict_public_buckets'].filter(key => a[key] === false);
-    if (disabled.length) out.push(finding('high', 'S3 public access block controls disabled', resource, `The following controls are explicitly false: ${disabled.join(', ')}.`, 'Enable all public-access-block controls unless a reviewed exception requires otherwise.', 'confirmed', { attribute: disabled.join(','), value: false }));
+
+  const nestedPab = a.public_access_block_configuration || a.PublicAccessBlockConfiguration;
+  if (/s3_bucket_public_access_block/i.test(type) || nestedPab) {
+    const config = nestedPab || a;
+    const controls = [
+      ['BlockPublicAcls', firstDefined(config.block_public_acls, config.BlockPublicAcls)],
+      ['IgnorePublicAcls', firstDefined(config.ignore_public_acls, config.IgnorePublicAcls)],
+      ['BlockPublicPolicy', firstDefined(config.block_public_policy, config.BlockPublicPolicy)],
+      ['RestrictPublicBuckets', firstDefined(config.restrict_public_buckets, config.RestrictPublicBuckets)]
+    ];
+    const disabled = controls.filter(([, value]) => scalarValue(value) === false).map(([name]) => name);
+    if (disabled.length) out.push(finding('S4BLE-AWS-S3-002', 'medium', 'S3 bucket-level public-access guardrails are disabled', resource,
+      `The imported bucket-level configuration explicitly disables: ${disabled.join(', ')}. This weakens bucket-level prevention, but account or organization settings may still enforce stricter protection.`,
+      'Enable all four bucket-level Block Public Access settings unless public access is an explicit and reviewed requirement.', 'high', { attribute: 'PublicAccessBlockConfiguration', value: disabled },
+      { kind: 'hardening', scoreWeight: 0.55, limitations: 'S3 applies the most restrictive effective combination of organization, account, access-point, and bucket settings.' }));
   }
-  if (/iam_policy|iam_role_policy|aws::iam::policy/i.test(type)) {
-    if (hasWildcardIam(a)) out.push(finding('high', 'Wildcard IAM permission detected', resource, 'The policy declares wildcard actions or resources, increasing privilege scope.', 'Scope actions and resources to the minimum required permissions and ARNs.', 'confirmed', { attribute: 'policy', value: '[policy contains wildcard]' }));
+
+  if (/s3_bucket_policy|aws::s3::bucketpolicy/i.test(type)) {
+    const policy = firstDefined(a.policy, a.PolicyDocument);
+    for (const exposure of analyzePublicBucketPolicy(policy)) {
+      out.push(finding(exposure.ruleId, exposure.severity, exposure.title, resource, exposure.description, exposure.recommendation, exposure.confidence, exposure.evidence, exposure.options));
+    }
   }
+
+  if (/iam|aws::iam::/i.test(type)) {
+    for (const issue of analyzeIamResource(resource)) {
+      out.push(finding(issue.ruleId, issue.severity, issue.title, resource, issue.description, issue.recommendation, issue.confidence, issue.evidence, issue.options));
+    }
+  }
+
   if (/ebs_volume|aws::ec2::volume/i.test(type)) {
-    const encrypted = firstDefined(a.encrypted, a.Encrypted);
-    if (encrypted === false) out.push(finding('medium', 'Block storage encryption disabled', resource, 'Encryption is explicitly disabled on the block storage resource.', 'Enable encryption and use an appropriate KMS key policy.', 'confirmed', { attribute: 'encrypted/Encrypted', value: false }));
+    const encrypted = scalarValue(firstDefined(a.encrypted, a.Encrypted));
+    if (encrypted === false) out.push(finding('S4BLE-AWS-EBS-001', 'medium', 'EBS volume requests encryption disabled', resource,
+      'The imported resource explicitly requests an unencrypted EBS volume.',
+      'Enable EBS encryption and verify the effective account-level encryption-by-default setting and KMS key policy.', 'high', { attribute: 'encrypted/Encrypted', value: false },
+      { kind: 'data_protection', limitations: 'Account-level EBS encryption-by-default can affect the effective result; Sable does not query the account control plane.' }));
   }
+
   if (/launch_template|instance$|aws::ec2::instance/i.test(type)) {
-    const publicIp = firstDefined(a.associate_public_ip_address, a.AssociatePublicIpAddress);
-    const nestedPublic = Array.isArray(a.network_interfaces) && a.network_interfaces.some(n => n?.associate_public_ip_address === true);
-    if (publicIp === true || nestedPublic) out.push(finding('medium', 'Public IP assignment enabled', resource, 'The compute configuration explicitly enables a public IP address.', 'Prefer private addressing behind controlled ingress unless direct internet addressing is required.', 'confirmed', { attribute: 'associate_public_ip_address', value: true }));
+    const publicIp = scalarValue(firstDefined(a.associate_public_ip_address, a.AssociatePublicIpAddress));
+    const networkInterfaces = firstDefined(a.network_interfaces, a.NetworkInterfaces) || [];
+    const nestedPublic = (Array.isArray(networkInterfaces) ? networkInterfaces : [networkInterfaces]).some(n => scalarValue(firstDefined(n?.associate_public_ip_address, n?.AssociatePublicIpAddress)) === true);
+    if (publicIp === true || nestedPublic) out.push(finding('S4BLE-AWS-EC2-001', 'medium', 'Public IP assignment explicitly enabled', resource,
+      'The compute configuration explicitly requests a public IP on an interface. A public IP does not by itself prove that inbound traffic is allowed.',
+      'Use private addressing for workloads that do not need direct internet addressing and verify routing and security-group exposure separately.', 'confirmed', { attribute: 'associate_public_ip_address/AssociatePublicIpAddress', value: true },
+      { kind: 'exposure', scoreWeight: 0.55, limitations: 'Reachability still depends on subnet routing, security groups, network ACLs, and the service listening on the instance.' }));
   }
+
   if (/autoscaling_group|aws::autoscaling::autoscalinggroup/i.test(type)) {
-    const max = firstDefined(a.max_size, a.MaxSize);
-    if (max != null && Number(max) <= 1) out.push(finding('medium', 'Auto Scaling maximum capacity is one', resource, 'The declared maximum capacity prevents the group from running more than one instance.', 'Set capacity according to availability and scaling requirements, typically across multiple failure domains.', 'confirmed', { attribute: 'max_size/MaxSize', value: max }));
+    const max = scalarValue(firstDefined(a.max_size, a.MaxSize));
+    if (max != null && Number.isFinite(Number(max)) && Number(max) <= 1) out.push(finding('S4BLE-AWS-ASG-001', 'low', 'Auto Scaling maximum capacity is one', resource,
+      'The group cannot scale above one instance according to the imported maximum-capacity setting.',
+      'Validate that a single-instance ceiling meets the workload availability and scaling objectives.', 'confirmed', { attribute: 'max_size/MaxSize', value: max },
+      { kind: 'availability', scoreEligible: false }));
   }
+
+  if (/lambda_function_url|aws::lambda::url/i.test(type)) {
+    const authType = String(scalarValue(firstDefined(a.authorization_type, a.AuthType, '')) || '').toUpperCase();
+    if (authType === 'NONE') out.push(finding('S4BLE-AWS-LAMBDA-URL-001', 'high', 'Lambda Function URL has no IAM authentication', resource,
+      'The Function URL is explicitly configured with AuthType/authorization_type NONE, so the URL itself does not require AWS IAM authentication.',
+      'Use AWS_IAM authentication unless anonymous invocation is an explicit requirement, and review the function resource policy before deployment.', 'confirmed', { attribute: 'authorization_type/AuthType', value: authType },
+      { kind: 'exposure', limitations: 'Effective invocation also depends on the Lambda resource policy.' }));
+  }
+
   return out;
 }
 
@@ -581,19 +777,26 @@ function evaluateAzure(resource) {
   const a = resource.attributes || {};
   if (/network_security_group|networksecuritygroups/.test(type)) {
     const rules = a.security_rule || a.security_rules || a.securityRules || [];
-    for (const rule of Array.isArray(rules) ? rules : [rules]) {
+    for (const [index, rule] of (Array.isArray(rules) ? rules : [rules]).entries()) {
+      if (!rule || typeof rule !== 'object') continue;
       const direction = String(rule.direction || '').toLowerCase();
       const access = String(rule.access || '').toLowerCase();
-      const sources = [rule.source_address_prefix, ...(rule.source_address_prefixes || [])].filter(Boolean);
-      const ports = String(rule.destination_port_range || '').split(',').flatMap(parsePortToken);
-      if (direction === 'inbound' && access === 'allow' && sources.some(source => source === '*' || source === '0.0.0.0/0' || source === '::/0') && ports.some(port => SENSITIVE_PORTS.has(port))) {
-        out.push(finding('critical', 'Sensitive NSG port exposed publicly', resource, 'An inbound allow rule permits a sensitive port from a world-routable source.', 'Restrict the source prefix and use managed administrative access paths.', 'confirmed', { attribute: 'security_rule', value: rule }));
-      }
+      const sources = [rule.source_address_prefix, ...(rule.source_address_prefixes || [])].filter(Boolean).map(String);
+      const publicSource = sources.some(isAzureInternetSource);
+      const ports = parseAzurePortRanges(firstDefined(rule.destination_port_ranges, rule.destination_port_range));
+      const allPorts = ports.all;
+      if (direction === 'inbound' && access === 'allow' && publicSource && allPorts) out.push(finding('S4BLE-AZURE-NSG-001', 'critical', 'NSG allows internet ingress to all destination ports', resource,
+        'The inbound allow rule uses an internet-wide source and an unrestricted destination port range.', 'Restrict the source and destination ports to the minimum required.', 'confirmed', { attribute: `security_rule[${index}]`, value: rule }, { kind: 'exposure' }));
+      else if (direction === 'inbound' && access === 'allow' && publicSource && Array.from(SENSITIVE_PORTS).some(port => ports.values.has(port))) out.push(finding('S4BLE-AZURE-NSG-002', 'high', 'Sensitive NSG port exposed to the internet', resource,
+        'The inbound allow rule permits a sensitive administrative or data-service port from an internet-wide source.', 'Restrict the source prefix and use managed administrative access paths.', 'confirmed', { attribute: `security_rule[${index}]`, value: rule }, { kind: 'exposure' }));
     }
   }
   if (/storage_account/.test(type)) {
-    const publicAccess = firstDefined(a.allow_nested_items_to_be_public, a.allow_blob_public_access);
-    if (publicAccess === true) out.push(finding('medium', 'Blob public access capability enabled', resource, 'The storage account allows nested items or blobs to be configured for public access.', 'Disable public blob access unless it is a deliberate requirement.', 'confirmed', { attribute: 'allow_nested_items_to_be_public', value: true }));
+    const publicAccess = scalarValue(firstDefined(a.allow_nested_items_to_be_public, a.allow_blob_public_access));
+    if (publicAccess === true) out.push(finding('S4BLE-AZURE-STORAGE-001', 'low', 'Blob public-access capability enabled', resource,
+      'The storage-account setting allows containers/blobs to be configured for anonymous public access. It does not prove that any container is currently public.',
+      'Disable the capability unless anonymous blob access is an explicit requirement.', 'confirmed', { attribute: 'allow_nested_items_to_be_public/allow_blob_public_access', value: true },
+      { kind: 'hardening', scoreEligible: false, limitations: 'Container-level configuration determines whether content is actually public.' }));
   }
   return out;
 }
@@ -603,16 +806,36 @@ function evaluateGcp(resource) {
   const type = resource.type.toLowerCase();
   const a = resource.attributes || {};
   if (/compute_firewall/.test(type)) {
-    const sources = a.source_ranges || [];
-    const world = Array.isArray(sources) && sources.some(isWorldCidr);
-    const allowed = a.allow || [];
-    const ports = (Array.isArray(allowed) ? allowed : [allowed]).flatMap(rule => (rule?.ports || []).flatMap(parsePortToken));
-    if (world && ports.some(port => SENSITIVE_PORTS.has(port))) out.push(finding('critical', 'Sensitive firewall port exposed publicly', resource, 'The firewall source range includes the internet and allows a sensitive port.', 'Restrict source ranges or use identity-aware administrative access.', 'confirmed', { attribute: 'source_ranges/allow', value: { sources, allowed } }));
+    const sources = Array.isArray(a.source_ranges) ? a.source_ranges.map(String) : [];
+    const world = sources.some(isWorldCidr);
+    const allowed = Array.isArray(a.allow) ? a.allow : (a.allow ? [a.allow] : []);
+    if (world) {
+      let allPorts = false;
+      const exposed = new Set();
+      for (const rule of allowed) {
+        const protocol = String(rule?.protocol || '').toLowerCase();
+        const ports = rule?.ports || [];
+        if (protocol === 'all' || protocol === '-1' || ((protocol === 'tcp' || protocol === 'udp') && (!ports || ports.length === 0))) allPorts = true;
+        for (const port of (ports || []).flatMap(parsePortToken)) if (SENSITIVE_PORTS.has(port)) exposed.add(port);
+      }
+      if (allPorts) out.push(finding('S4BLE-GCP-FW-001', 'critical', 'GCP firewall allows internet ingress broadly', resource,
+        'The firewall rule has a world-routable source range and an allow entry that does not restrict ports for the allowed protocol.', 'Restrict source ranges, protocols, and ports to the minimum required.', 'confirmed', { attribute: 'source_ranges/allow', value: { sources, allowed } }, { kind: 'exposure' }));
+      else if (exposed.size) out.push(finding('S4BLE-GCP-FW-002', 'high', 'Sensitive GCP firewall port exposed publicly', resource,
+        `The firewall rule allows sensitive port(s) ${Array.from(exposed).join(', ')} from a world-routable source range.`, 'Restrict source ranges or use identity-aware administrative access.', 'confirmed', { attribute: 'source_ranges/allow', value: { sources, allowed } }, { kind: 'exposure' }));
+    }
   }
   if (/sql_database_instance/.test(type)) {
-    const ipConfig = Array.isArray(a.settings) ? a.settings[0]?.ip_configuration : a.settings?.ip_configuration || a.ip_configuration;
-    const ipv4 = Array.isArray(ipConfig) ? ipConfig[0]?.ipv4_enabled : ipConfig?.ipv4_enabled;
-    if (ipv4 === true) out.push(finding('high', 'Cloud SQL public IPv4 enabled', resource, 'The database instance explicitly enables a public IPv4 interface. Authorized networks and IAM still determine effective access.', 'Prefer private IP where practical and tightly restrict authorized networks.', 'confirmed', { attribute: 'settings.ip_configuration.ipv4_enabled', value: true }));
+    const settings = Array.isArray(a.settings) ? a.settings[0] : a.settings;
+    const ipConfigRaw = settings?.ip_configuration || a.ip_configuration;
+    const ipConfig = Array.isArray(ipConfigRaw) ? ipConfigRaw[0] : ipConfigRaw;
+    const ipv4 = scalarValue(ipConfig?.ipv4_enabled);
+    if (ipv4 === true) out.push(finding('S4BLE-GCP-SQL-001', 'medium', 'Cloud SQL public IPv4 interface enabled', resource,
+      'The database explicitly enables a public IPv4 interface. Authorized networks, IAM/database authentication, and other controls still determine who can connect.', 'Prefer private IP where practical and tightly scope authorized networks.', 'confirmed', { attribute: 'settings.ip_configuration.ipv4_enabled', value: true },
+      { kind: 'exposure', scoreWeight: 0.55, limitations: 'A public interface is not equivalent to anonymous or unrestricted database access.' }));
+    const authNetworks = ipConfig?.authorized_networks || [];
+    const world = (Array.isArray(authNetworks) ? authNetworks : [authNetworks]).some(net => isWorldCidr(net?.value || net?.cidr_block || net));
+    if (world) out.push(finding('S4BLE-GCP-SQL-002', 'high', 'Cloud SQL authorized network includes the entire internet', resource,
+      'An authorized network explicitly includes 0.0.0.0/0 or ::/0.', 'Replace the world-routable CIDR with private connectivity or tightly scoped trusted source networks.', 'confirmed', { attribute: 'settings.ip_configuration.authorized_networks', value: authNetworks }, { kind: 'exposure' }));
   }
   return out;
 }
@@ -622,111 +845,438 @@ function evaluateKubernetes(resource) {
   const doc = resource.attributes || {};
   const podSpec = doc.spec?.template?.spec || (doc.kind === 'Pod' ? doc.spec : null);
   if (!podSpec) return out;
-  if (podSpec.hostNetwork === true) out.push(finding('high', 'Pod uses host network namespace', resource, 'hostNetwork is explicitly enabled, reducing network isolation from the node.', 'Disable hostNetwork unless the workload has a reviewed operational requirement.', 'confirmed', { attribute: 'spec.hostNetwork', value: true }));
-  const containers = [...(podSpec.containers || []), ...(podSpec.initContainers || [])];
+  const linux = String(podSpec.os?.name || 'linux').toLowerCase() !== 'windows';
+  if (podSpec.hostNetwork === true) out.push(finding('S4BLE-K8S-001', 'high', 'Pod uses the node network namespace', resource,
+    'hostNetwork is explicitly enabled, reducing network isolation between the workload and node.', 'Disable hostNetwork unless the workload has a reviewed operational requirement.', 'confirmed', { attribute: 'spec.hostNetwork', value: true }, { kind: 'privilege', scoreWeight: 0.75 }));
+  if (podSpec.hostPID === true) out.push(finding('S4BLE-K8S-002', 'high', 'Pod uses the node PID namespace', resource,
+    'hostPID is explicitly enabled, exposing node process namespace visibility to the pod.', 'Disable hostPID unless a tightly controlled system workload requires it.', 'confirmed', { attribute: 'spec.hostPID', value: true }, { kind: 'privilege' }));
+  if (podSpec.hostIPC === true) out.push(finding('S4BLE-K8S-003', 'high', 'Pod uses the node IPC namespace', resource,
+    'hostIPC is explicitly enabled, reducing process-isolation boundaries.', 'Disable hostIPC unless a tightly controlled workload requires it.', 'confirmed', { attribute: 'spec.hostIPC', value: true }, { kind: 'privilege' }));
+  for (const [index, volume] of (podSpec.volumes || []).entries()) {
+    if (volume?.hostPath?.path) out.push(finding('S4BLE-K8S-004', 'medium', 'Pod mounts a hostPath volume', resource,
+      `The pod mounts the node filesystem path ${volume.hostPath.path}. hostPath can expose node files to the workload depending on the path and mount mode.`, 'Prefer purpose-built volumes. If hostPath is required, minimize the path and use read-only mounts where possible.', 'confirmed', { attribute: `spec.volumes[${index}].hostPath`, value: volume.hostPath },
+      { kind: 'privilege', scoreWeight: 0.65 }));
+  }
+  const podSecurity = podSpec.securityContext || {};
+  const containers = [...(podSpec.containers || []), ...(podSpec.initContainers || []), ...(podSpec.ephemeralContainers || [])];
   for (const container of containers) {
     const sc = container.securityContext || {};
-    if (sc.privileged === true) out.push(finding('critical', `Privileged container: ${container.name || 'unnamed'}`, resource, 'A container explicitly requests privileged mode.', 'Remove privileged mode and grant only the specific Linux capabilities required.', 'confirmed', { attribute: `container.${container.name}.securityContext.privileged`, value: true }));
-    if (sc.allowPrivilegeEscalation === true) out.push(finding('high', `Privilege escalation allowed: ${container.name || 'unnamed'}`, resource, 'The container explicitly allows privilege escalation.', 'Set allowPrivilegeEscalation to false unless a reviewed workload requires it.', 'confirmed', { attribute: `container.${container.name}.securityContext.allowPrivilegeEscalation`, value: true }));
+    const name = container.name || 'unnamed';
+    if (sc.privileged === true) out.push(finding('S4BLE-K8S-005', 'critical', `Privileged container: ${name}`, resource,
+      'The container explicitly requests privileged mode, which grants broad host-level capabilities.', 'Remove privileged mode and grant only the specific capabilities required.', 'confirmed', { attribute: `container.${name}.securityContext.privileged`, value: true }, { kind: 'privilege' }));
+    if (linux && sc.allowPrivilegeEscalation === true) out.push(finding('S4BLE-K8S-006', 'high', `Privilege escalation explicitly allowed: ${name}`, resource,
+      'allowPrivilegeEscalation is explicitly true for the container.', 'Set allowPrivilegeEscalation to false unless a reviewed workload requires it.', 'confirmed', { attribute: `container.${name}.securityContext.allowPrivilegeEscalation`, value: true }, { kind: 'privilege' }));
+    const runAsNonRoot = firstDefined(sc.runAsNonRoot, podSecurity.runAsNonRoot);
+    const runAsUser = firstDefined(sc.runAsUser, podSecurity.runAsUser);
+    if (linux && (runAsNonRoot === false || Number(runAsUser) === 0)) out.push(finding('S4BLE-K8S-007', 'medium', `Container may run as root: ${name}`, resource,
+      runAsNonRoot === false ? 'runAsNonRoot is explicitly false.' : 'runAsUser is explicitly set to UID 0.', 'Run the workload as a non-root UID unless root is required and separately mitigated.', 'confirmed', { attribute: `container.${name}.securityContext`, value: { runAsNonRoot, runAsUser } }, { kind: 'privilege', scoreWeight: 0.7 }));
+    const addedCaps = (sc.capabilities?.add || []).map(cap => String(cap).toUpperCase());
+    const dangerousCaps = addedCaps.filter(cap => ['SYS_ADMIN', 'SYS_MODULE', 'SYS_PTRACE', 'NET_ADMIN', 'DAC_READ_SEARCH'].includes(cap));
+    if (dangerousCaps.length) out.push(finding('S4BLE-K8S-008', 'high', `Sensitive Linux capability added: ${name}`, resource,
+      `The container explicitly adds ${dangerousCaps.join(', ')}.`, 'Remove unnecessary capabilities and start from a drop-all posture where practical.', 'confirmed', { attribute: `container.${name}.securityContext.capabilities.add`, value: dangerousCaps }, { kind: 'privilege' }));
+    if (linux && String(sc.seccompProfile?.type || podSecurity.seccompProfile?.type || '').toLowerCase() === 'unconfined') out.push(finding('S4BLE-K8S-009', 'high', `Seccomp explicitly unconfined: ${name}`, resource,
+      'The effective declared seccomp profile is Unconfined.', 'Use RuntimeDefault or a reviewed Localhost seccomp profile.', 'confirmed', { attribute: `container.${name}.securityContext.seccompProfile.type`, value: 'Unconfined' }, { kind: 'hardening' }));
   }
   return out;
 }
 
-function evaluateScopeControls(resources, workspace) {
-  const out = [];
-  if (!resources.length) return out;
-  const awsResources = resources.filter(r => r.provider === 'AWS');
-  if (awsResources.length && workspace.analysisMode === 'terraform-plan-json') {
-    const hasTrail = awsResources.some(r => /cloudtrail/i.test(r.type));
-    if (!hasTrail) out.push({
-      id: makeId('scope-audit'), ruleId: 'IV-AWS-SCOPE-CLOUDTRAIL', severity: 'low', title: 'No CloudTrail resource in imported Terraform plan scope', resource: 'workspace',
-      description: 'The analyzed Terraform plan does not declare a CloudTrail resource. CloudTrail may still be managed in another workspace or account-level control plane.',
-      recommendation: 'Confirm organization/account audit logging exists outside this workspace or manage it explicitly here.', confidence: 'medium', evidence: { scope: workspace.scope }, sourceMode: workspace.analysisMode
-    });
-  }
-  return out;
-}
-
-function normalizeSecurityRules(a) {
+function normalizeSecurityRules(a, resourceType = '') {
   const result = [];
-  let ingress = a.ingress || a.SecurityGroupIngress || [];
-  const looksLikeStandaloneRule = ['from_port', 'FromPort', 'cidr_ipv4', 'cidr_ipv6', 'CidrIp', 'CidrIpv6'].some(key => a[key] !== undefined);
-  if ((!Array.isArray(ingress) || !ingress.length) && looksLikeStandaloneRule) ingress = [a];
+  let ingress = firstDefined(a.ingress, a.SecurityGroupIngress, []);
+  const standalone = ['from_port', 'FromPort', 'cidr_ipv4', 'cidr_ipv6', 'CidrIp', 'CidrIpv6', 'ip_protocol', 'IpProtocol'].some(key => a[key] !== undefined);
+  const declaredType = String(firstDefined(a.type, '')).toLowerCase();
+  const isIngressResource = /ingress/.test(resourceType) || declaredType === 'ingress' || (!/egress/.test(resourceType) && declaredType !== 'egress');
+  if ((!Array.isArray(ingress) || !ingress.length) && standalone && isIngressResource) ingress = [a];
   for (const [index, rule] of (Array.isArray(ingress) ? ingress : [ingress]).entries()) {
     if (!rule || typeof rule !== 'object') continue;
-    const fromPort = Number(firstDefined(rule.from_port, rule.FromPort, 0));
-    const toPort = Number(firstDefined(rule.to_port, rule.ToPort, fromPort));
+    const protocol = String(scalarValue(firstDefined(rule.protocol, rule.ip_protocol, rule.IpProtocol, 'tcp')) || '').toLowerCase();
+    const rawFrom = scalarValue(firstDefined(rule.from_port, rule.FromPort));
+    const rawTo = scalarValue(firstDefined(rule.to_port, rule.ToPort, rawFrom));
+    const fromPort = rawFrom === undefined || rawFrom === null || rawFrom === '' ? null : Number(rawFrom);
+    const toPort = rawTo === undefined || rawTo === null || rawTo === '' ? fromPort : Number(rawTo);
     const sources = [
-      ...(rule.cidr_blocks || []), ...(rule.ipv6_cidr_blocks || []),
+      ...(Array.isArray(rule.cidr_blocks) ? rule.cidr_blocks : (rule.cidr_blocks ? [rule.cidr_blocks] : [])),
+      ...(Array.isArray(rule.ipv6_cidr_blocks) ? rule.ipv6_cidr_blocks : (rule.ipv6_cidr_blocks ? [rule.ipv6_cidr_blocks] : [])),
       rule.cidr_ipv4, rule.cidr_ipv6, rule.CidrIp, rule.CidrIpv6, rule.cidr, rule.source
-    ].filter(Boolean).flat();
-    result.push({ fromPort, toPort, sources: sources.map(String), path: `ingress[${index}]` });
+    ].filter(Boolean).flat().map(String);
+    const allPorts = protocol === '-1' || protocol === 'all' || (Number.isFinite(fromPort) && Number.isFinite(toPort) && fromPort <= 0 && toPort >= 65535);
+    result.push({ direction: 'ingress', protocol, fromPort, toPort, allPorts, sources, path: `ingress[${index}]` });
   }
   return result;
 }
 
-function hasWildcardIam(value) {
-  const scan = item => {
-    if (item == null) return false;
-    if (typeof item === 'string') {
-      const s = item.replace(/\\"/g, '"');
-      return /(?:"Action"\s*:\s*"\*"|Action\s*[=:]\s*["']?\*|"Resource"\s*:\s*"\*"|Resource\s*[=:]\s*["']?\*)/i.test(s);
-    }
-    if (Array.isArray(item)) return item.some(scan);
-    if (typeof item === 'object') {
-      for (const [key, child] of Object.entries(item)) {
-        if (/^(Action|Resource)$/i.test(key)) {
-          if (child === '*' || (Array.isArray(child) && child.includes('*'))) return true;
-        }
-        if (scan(child)) return true;
-      }
-    }
-    return false;
-  };
-  return scan(value);
+function ruleIncludesPort(rule, port) {
+  if (rule.allPorts) return true;
+  if (!Number.isFinite(rule.fromPort) || !Number.isFinite(rule.toPort)) return false;
+  return port >= Math.min(rule.fromPort, rule.toPort) && port <= Math.max(rule.fromPort, rule.toPort);
 }
 
-function inferConservativeLinks(resources, existingLinks) {
-  // Inference is deliberately conservative and never mixed with confirmed links.
-  const links = [];
-  const confirmed = new Set(existingLinks.map(l => `${l.source}=>${l.target}`));
-  const byCategory = category => resources.filter(r => r.category === category);
-  for (const compute of byCategory('compute')) {
-    for (const obs of byCategory('observability')) {
-      const key = `${compute.id}=>${obs.id}`;
-      if (!confirmed.has(key)) links.push({ source: compute.id, target: obs.id, label: 'possible telemetry relationship', confidence: 'inferred', evidence: { reason: 'category heuristic' } });
+function analyzeIamResource(resource) {
+  const issues = [];
+  const a = resource.attributes || {};
+  const docs = [];
+  const textPolicies = [];
+  const addDoc = (kind, value, path) => {
+    const parsed = parsePolicyValue(value);
+    if (parsed) docs.push({ kind, doc: parsed, path });
+    else if (typeof value === 'string' && value.trim()) textPolicies.push({ kind, text: value, path });
+  };
+  addDoc('identity', firstDefined(a.policy, a.PolicyDocument), 'policy/PolicyDocument');
+  addDoc('trust', firstDefined(a.assume_role_policy, a.AssumeRolePolicyDocument), 'assume_role_policy/AssumeRolePolicyDocument');
+  for (const [index, entry] of (Array.isArray(a.Policies) ? a.Policies : []).entries()) addDoc('identity', entry?.PolicyDocument, `Policies[${index}].PolicyDocument`);
+  for (const [index, entry] of (Array.isArray(a.inline_policy) ? a.inline_policy : []).entries()) addDoc('identity', entry?.policy, `inline_policy[${index}].policy`);
+
+  for (const { kind, doc, path } of docs) {
+    const statements = Array.isArray(doc.Statement) ? doc.Statement : (doc.Statement ? [doc.Statement] : []);
+    for (const [index, statement] of statements.entries()) {
+      if (!statement || String(statement.Effect || 'Allow').toLowerCase() !== 'allow') continue;
+      const conditionPresent = statement.Condition && Object.keys(statement.Condition).length > 0;
+      if (kind === 'trust') {
+        if (principalIsWildcard(statement.Principal) && !conditionPresent) issues.push({
+          ruleId: 'S4BLE-AWS-IAM-TRUST-001', severity: 'critical', title: 'IAM role trust policy allows any principal',
+          description: 'An Allow statement in the role trust policy uses a wildcard principal without a restricting Condition.',
+          recommendation: 'Replace the wildcard principal with intended accounts/services/roles or add a narrowly scoped, reviewed condition.', confidence: 'confirmed',
+          evidence: { attribute: `${path}.Statement[${index}]`, value: summarizePolicyStatement(statement) }, options: { kind: 'privilege' }
+        });
+        continue;
+      }
+      const actions = asStringArray(statement.Action);
+      const resources = asStringArray(statement.Resource);
+      const actionAll = actions.includes('*');
+      const resourceAll = resources.includes('*');
+      if (actionAll) issues.push({
+        ruleId: 'S4BLE-AWS-IAM-001', severity: resourceAll && !conditionPresent ? 'critical' : 'high', title: 'IAM Allow statement uses Action "*"',
+        description: conditionPresent
+          ? 'An IAM Allow statement grants all AWS actions and relies on a Condition/resource scope to constrain use.'
+          : 'An IAM Allow statement grants all AWS actions. This is substantially broader than least privilege.',
+        recommendation: 'Replace Action "*" with the exact API actions required and scope resources/conditions where supported.', confidence: 'confirmed',
+        evidence: { attribute: `${path}.Statement[${index}]`, value: summarizePolicyStatement(statement) }, options: { kind: 'privilege' }
+      });
+      const serviceWildcards = actions.filter(action => /^[a-z0-9-]+:\*$/i.test(action));
+      for (const action of serviceWildcards) {
+        const service = action.split(':')[0].toLowerCase();
+        issues.push({
+          ruleId: 'S4BLE-AWS-IAM-002', severity: PRIVILEGED_IAM_SERVICES.has(service) || resourceAll ? 'high' : 'medium', title: `Broad IAM service permission: ${action}`,
+          description: `The Allow statement grants every action in the ${service} service${resourceAll ? ' across all resources' : ''}.`,
+          recommendation: 'Replace service-wide wildcards with the exact actions required and resource-scope the statement where the service supports it.', confidence: 'confirmed',
+          evidence: { attribute: `${path}.Statement[${index}]`, value: summarizePolicyStatement(statement) }, options: { kind: 'privilege', scoreWeight: 0.8 }
+        });
+      }
+      if (statement.NotAction && resourceAll && !conditionPresent) issues.push({
+        ruleId: 'S4BLE-AWS-IAM-003', severity: 'high', title: 'IAM Allow statement uses NotAction with Resource "*"',
+        description: 'An Allow statement uses NotAction while applying to all resources, which can grant a much broader set of actions than the exclusions suggest.',
+        recommendation: 'Prefer an explicit Action allow-list and scope resources and conditions to the intended use case.', confidence: 'confirmed',
+        evidence: { attribute: `${path}.Statement[${index}]`, value: summarizePolicyStatement(statement) }, options: { kind: 'privilege' }
+      });
     }
   }
-  return dedupeLinks(links).slice(0, 20);
+  for (const { kind, text: policyText, path } of textPolicies) {
+    const normalized = policyText.replace(/\\"/g, '"');
+    const allow = /(?:"?Effect"?\s*[:=]\s*["']?Allow["']?)/i.test(normalized);
+    if (!allow) continue;
+    if (kind === 'trust' && /(?:"?Principal"?\s*[:=][\s\S]{0,80}["']?\*["']?)/i.test(normalized)) {
+      issues.push({
+        ruleId: 'S4BLE-AWS-IAM-TRUST-001', severity: 'high', title: 'IAM trust policy text contains a wildcard principal',
+        description: 'Static source text contains an Allow trust-policy declaration with a wildcard Principal. S4BLE could not fully evaluate the expression, so conditions and computed values may change the effective result.',
+        recommendation: 'Resolve the policy through terraform show -json and verify the final Principal and Condition.', confidence: 'high',
+        evidence: { attribute: path, value: '[static policy expression contains Principal "*"]' },
+        options: { kind: 'privilege', scoreWeight: 0.7, limitations: 'Textual static-source match; use Terraform plan JSON for the resolved policy document.' }
+      });
+    }
+    if (kind === 'identity' && /(?:"?Action"?\s*[:=][\s\[]*["']\*["'])/i.test(normalized)) {
+      issues.push({
+        ruleId: 'S4BLE-AWS-IAM-001', severity: 'high', title: 'IAM policy source contains Action "*"',
+        description: 'Static source text contains an Allow statement with Action "*". S4BLE could not fully evaluate the policy expression, so resource and condition scope may still constrain the final policy.',
+        recommendation: 'Resolve the policy with terraform show -json and replace Action "*" with the exact actions required.', confidence: 'high',
+        evidence: { attribute: path, value: '[static policy expression contains Action "*"]' },
+        options: { kind: 'privilege', scoreWeight: 0.7, limitations: 'Textual static-source match; use Terraform plan JSON for resolved policy semantics.' }
+      });
+    }
+  }
+  return dedupeIssues(issues);
 }
 
-function finding(severity, title, resource, description, recommendation, confidence, evidence) {
-  const ruleId = `IV-${String(resource.provider || 'GEN').toUpperCase().replace(/[^A-Z0-9]+/g, '-')}-${title.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48)}`;
-  return { id: makeId(`${resource.id}-${title}`), ruleId, severity, title, resource: resource.id, description, recommendation, confidence, evidence };
+function analyzePublicBucketPolicy(value) {
+  const doc = parsePolicyValue(value);
+  if (!doc) return [];
+  const issues = [];
+  const statements = Array.isArray(doc.Statement) ? doc.Statement : (doc.Statement ? [doc.Statement] : []);
+  for (const [index, statement] of statements.entries()) {
+    if (!statement || String(statement.Effect || '').toLowerCase() !== 'allow') continue;
+    if (!principalIsWildcard(statement.Principal)) continue;
+    if (statement.Condition && Object.keys(statement.Condition).length) continue;
+    const actions = asStringArray(statement.Action).map(value => value.toLowerCase());
+    const write = actions.some(action => action === '*' || /s3:(put|delete|abort|restore|create|replicate|write)/.test(action) || action === 's3:*');
+    issues.push({
+      ruleId: write ? 'S4BLE-AWS-S3-004' : 'S4BLE-AWS-S3-003',
+      severity: write ? 'critical' : 'high',
+      title: write ? 'S3 bucket policy declares anonymous write-capable access' : 'S3 bucket policy declares anonymous access',
+      description: write
+        ? 'An unconditional Allow statement uses a wildcard principal and includes write-capable or service-wide S3 actions.'
+        : 'An unconditional Allow statement uses a wildcard principal. The policy declaration is public; S3 Block Public Access may still reject or restrict it.',
+      recommendation: 'Replace the wildcard principal with intended identities, or use a reviewed delivery pattern such as CloudFront when public read is required.',
+      confidence: 'confirmed', evidence: { attribute: `PolicyDocument.Statement[${index}]`, value: summarizePolicyStatement(statement) },
+      options: { kind: 'exposure', limitations: 'Effective access can still be blocked by S3 Block Public Access at bucket, account, access-point, or organization level.' }
+    });
+  }
+  return issues;
 }
 
-function calculatePostureScore(findings) {
-  const penalty = findings.reduce((sum, f) => sum + (SEVERITY_WEIGHT[f.severity] || 0) * (CONFIDENCE_WEIGHT[f.confidence] || 0.5), 0);
+function parsePolicyValue(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  let candidate = value.trim();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (typeof parsed === 'string') { candidate = parsed; continue; }
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch { break; }
+  }
+  return null;
+}
+
+function principalIsWildcard(principal) {
+  if (principal === '*') return true;
+  if (Array.isArray(principal)) return principal.includes('*');
+  if (principal && typeof principal === 'object') return Object.values(principal).flat().map(String).includes('*');
+  return false;
+}
+
+function summarizePolicyStatement(statement) {
+  return {
+    Effect: statement.Effect,
+    Action: statement.Action,
+    NotAction: statement.NotAction,
+    Resource: statement.Resource,
+    NotResource: statement.NotResource,
+    Principal: statement.Principal,
+    Condition: statement.Condition ? '[present]' : undefined
+  };
+}
+
+function asStringArray(value) {
+  if (value == null) return [];
+  return (Array.isArray(value) ? value : [value]).flat().filter(v => v != null).map(String);
+}
+
+function dedupeIssues(issues) {
+  const seen = new Set();
+  return issues.filter(issue => {
+    const key = `${issue.ruleId}:${JSON.stringify(issue.evidence)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isAzureInternetSource(value) {
+  const s = String(value || '').trim().toLowerCase();
+  return s === '*' || s === '0.0.0.0/0' || s === '::/0' || s === 'internet';
+}
+
+function parseAzurePortRanges(value) {
+  const values = new Set();
+  let all = false;
+  const items = Array.isArray(value) ? value : (value == null ? [] : String(value).split(','));
+  for (const item of items) {
+    const token = String(item).trim();
+    if (!token) continue;
+    if (token === '*') { all = true; continue; }
+    for (const port of parsePortToken(token)) values.add(port);
+  }
+  return { values, all };
+}
+
+function scalarValue(value) {
+  let current = value;
+  while (Array.isArray(current) && current.length === 1) current = current[0];
+  return current;
+}
+
+function buildRuleCoverage(resources) {
+  const postureResources = resources.filter(resource => resource.mode !== 'data');
+  let supportedResources = 0;
+  let applicableControlFamilies = 0;
+  const byProvider = {};
+  for (const resource of resources) byProvider[resource.provider] = (byProvider[resource.provider] || 0) + 1;
+  for (const resource of postureResources) {
+    const families = ruleFamiliesForResource(resource);
+    if (families.length) supportedResources += 1;
+    applicableControlFamilies += families.length;
+  }
+  const importedResources = resources.length;
+  const postureResourceCount = postureResources.length;
+  return {
+    importedResources,
+    postureResourceCount,
+    dataSourceCount: importedResources - postureResourceCount,
+    supportedResources,
+    unsupportedResources: Math.max(0, postureResourceCount - supportedResources),
+    supportedPercent: postureResourceCount ? Math.round((supportedResources / postureResourceCount) * 100) : 0,
+    applicableControlFamilies,
+    providerResourceCounts: byProvider,
+    note: 'Coverage measures managed/imported resources with an applicable built-in S4BLE rule family. Terraform data sources are mapped but excluded from posture scoring. Coverage is not a compliance percentage.'
+  };
+}
+
+function ruleFamiliesForResource(resource) {
+  const type = String(resource.type || '').toLowerCase();
+  if (resource.provider === 'AWS') {
+    const families = [];
+    if (/security_group|securitygroup|security_group_rule|security_group_ingress_rule/.test(type)) families.push('network-ingress');
+    if (/db_instance|rds_cluster|aws::rds::db/.test(type)) families.push('database-protection');
+    if (/s3_bucket|aws::s3::bucket/.test(type)) families.push('s3-access');
+    if (/iam|aws::iam::/.test(type)) families.push('iam-policy');
+    if (/ebs_volume|aws::ec2::volume/.test(type)) families.push('block-storage-encryption');
+    if (/launch_template|instance$|aws::ec2::instance/.test(type)) families.push('compute-addressing');
+    if (/autoscaling_group|aws::autoscaling::autoscalinggroup/.test(type)) families.push('autoscaling-capacity');
+    if (/lambda_function_url|aws::lambda::url/.test(type)) families.push('lambda-url-auth');
+    return families;
+  }
+  if (resource.provider === 'Azure') {
+    const families = [];
+    if (/network_security_group|networksecuritygroups/.test(type)) families.push('network-ingress');
+    if (/storage_account/.test(type)) families.push('storage-public-access-capability');
+    return families;
+  }
+  if (resource.provider === 'GCP') {
+    const families = [];
+    if (/compute_firewall/.test(type)) families.push('network-ingress');
+    if (/sql_database_instance/.test(type)) families.push('database-networking');
+    return families;
+  }
+  if (resource.provider === 'Kubernetes') {
+    return /deployment|stateful_set|daemon_set|pod|job|cron_job|replica_set/.test(type) ? ['pod-security'] : [];
+  }
+  return [];
+}
+
+function inferConservativeLinks() {
+  // Correctness takes precedence over visual completeness. No relationship is
+  // inferred merely because resources share a category, provider, or similar name.
+  return [];
+}
+
+function finding(ruleId, severity, title, resource, description, recommendation, confidence, evidence, options = {}) {
+  return {
+    id: makeId(`${ruleId}-${resource.id}-${title}`),
+    ruleId,
+    severity,
+    title,
+    resource: resource.id,
+    description,
+    recommendation,
+    confidence,
+    evidence,
+    kind: options.kind || 'operational',
+    scoreEligible: options.scoreEligible !== false,
+    scoreWeight: Number.isFinite(options.scoreWeight) ? options.scoreWeight : 1,
+    limitations: options.limitations || null,
+    reference: options.reference || null
+  };
+}
+
+function dedupeFindings(findings) {
+  const map = new Map();
+  for (const item of findings) {
+    const key = `${item.ruleId}|${item.resource}|${stableStringify(item.evidence)}`;
+    if (!map.has(key)) map.set(key, item);
+  }
+  return Array.from(map.values());
+}
+
+function calculatePostureScore(findings, coverage) {
+  if (!coverage?.supportedResources) return null;
+  const grouped = new Map();
+  for (const item of findings) {
+    if (item.scoreEligible === false) continue;
+    const severity = SEVERITY_WEIGHT[item.severity] || 0;
+    const confidence = CONFIDENCE_WEIGHT[item.confidence] ?? 0.5;
+    const kindWeight = FINDING_KIND_WEIGHT[item.kind] ?? 0.5;
+    const impact = severity * confidence * kindWeight * (Number.isFinite(item.scoreWeight) ? item.scoreWeight : 1);
+    const list = grouped.get(item.ruleId) || [];
+    list.push(impact);
+    grouped.set(item.ruleId, list);
+  }
+  let penalty = 0;
+  for (const values of grouped.values()) {
+    values.sort((a, b) => b - a);
+    if (!values.length) continue;
+    const first = values[0];
+    const repeats = values.slice(1).reduce((sum, value) => sum + value * 0.3, 0);
+    penalty += Math.min(first * 1.8, first + repeats);
+  }
   return Math.max(0, Math.round(100 - Math.min(100, penalty)));
 }
 
+function calculatePostureRating(findings, coverage) {
+  if (!coverage?.supportedResources) return 'Not rated — no built-in controls apply';
+  const eligible = findings.filter(item => item.scoreEligible !== false && (item.confidence === 'confirmed' || item.confidence === 'high'));
+  if (eligible.some(item => item.severity === 'critical')) return 'Critical findings detected';
+  if (eligible.some(item => item.severity === 'high')) return 'High-priority findings detected';
+  if (eligible.some(item => item.severity === 'medium')) return 'Review recommended';
+  if (eligible.some(item => item.severity === 'low')) return 'Advisory findings only';
+  return 'No confirmed issues detected by assessed controls';
+}
+
+function buildReviewFindingDelta(result, diffs, baselineResources) {
+  const changedIds = new Set(diffs.map(diff => diff.resource));
+  const currentFindings = (result.analysis.findings || []).filter(item => changedIds.has(item.resource));
+  const beforeFindings = [];
+  const baselineMap = new Map((baselineResources || []).map(resource => [resourceIdentity(resource), normalizeResource(resource)]));
+
+  for (const diff of diffs) {
+    if (diff.action === 'add') continue;
+    let beforeResource = null;
+    if (diff.before && typeof diff.before === 'object') {
+      beforeResource = normalizeResource({ id: diff.resource, address: diff.resource, type: diff.type, name: diff.name || nameFromAddress(diff.resource), provider: diff.provider || providerFromType(diff.type), attributes: diff.before });
+    } else if (baselineMap.has(diff.resource)) beforeResource = baselineMap.get(diff.resource);
+    if (!beforeResource) continue;
+    beforeFindings.push(...evaluateResource(beforeResource, [beforeResource], { analysisMode: 'review-baseline' }));
+  }
+
+  const key = item => `${item.ruleId}|${item.resource}`;
+  const beforeMap = new Map(beforeFindings.map(item => [key(item), item]));
+  const afterMap = new Map(currentFindings.map(item => [key(item), item]));
+  const introduced = [];
+  const existing = [];
+  const resolved = [];
+  for (const item of currentFindings) {
+    if (beforeMap.has(key(item))) existing.push({ ...item, reviewStatus: 'pre-existing-on-changed-resource' });
+    else introduced.push({ ...item, reviewStatus: 'introduced-or-newly-detectable' });
+  }
+  for (const item of beforeFindings) if (!afterMap.has(key(item))) resolved.push({ ...item, reviewStatus: 'resolved' });
+  return { introduced, existing, resolved, all: [...introduced, ...existing] };
+}
+
 function calculatePrRisk(findings, diffs) {
-  const findingPenalty = findings.reduce((sum, f) => sum + (SEVERITY_WEIGHT[f.severity] || 0) * (CONFIDENCE_WEIGHT[f.confidence] || 0.5), 0);
-  const changePenalty = diffs.reduce((sum, diff) => {
-    const base = diff.action === 'delete' ? 8 : diff.action === 'replace' ? 7 : diff.action === 'change' ? 4 : 2;
-    const sensitive = /iam|security|firewall|route|gateway|db|database|kms|key|policy/i.test(diff.type || diff.resource || '') ? 5 : 0;
-    return sum + base + sensitive;
+  let score = findings.reduce((sum, item) => {
+    const base = SEVERITY_WEIGHT[item.severity] || 0;
+    const confidence = CONFIDENCE_WEIGHT[item.confidence] ?? 0.5;
+    const kindWeight = FINDING_KIND_WEIGHT[item.kind] ?? 0.5;
+    return sum + base * confidence * kindWeight * (Number.isFinite(item.scoreWeight) ? item.scoreWeight : 1);
   }, 0);
-  return Math.min(100, Math.round(findingPenalty + changePenalty));
+  for (const diff of diffs) {
+    const identity = `${diff.type || ''} ${diff.resource || ''}`;
+    if (diff.action === 'add') score += 2;
+    if (diff.action === 'change') score += 3;
+    if (diff.action === 'replace') score += 8;
+    if (diff.action === 'delete') score += 8;
+    if ((diff.action === 'delete' || diff.action === 'replace') && /db|database|rds|sql|dynamodb|kms|key|secret|bucket|storage/i.test(identity)) score += 14;
+    else if (/iam|security|firewall|route|gateway|policy/i.test(identity)) score += 6;
+  }
+  return Math.min(100, Math.round(score));
 }
 
 function approvalDecision(score, findings, diffs) {
-  if (findings.some(f => f.severity === 'critical' && f.confidence === 'confirmed')) return 'Block until remediated';
-  if (diffs.some(d => d.action === 'delete' && /db|database|kms|key|iam|security/i.test(d.type || d.resource || ''))) return 'Senior review required';
-  if (score >= 70) return 'Block until remediated';
-  if (score >= 40) return 'Senior review required';
-  if (score >= 18) return 'Approve with comments';
-  return 'Low-risk approval';
+  if (findings.some(f => f.severity === 'critical' && f.confidence === 'confirmed')) return 'Block: confirmed critical change';
+  if (diffs.some(d => (d.action === 'delete' || d.action === 'replace') && /db|database|rds|sql|kms|key|secret/i.test(`${d.type || ''} ${d.resource || ''}`))) return 'High-risk destructive change — senior review';
+  if (score >= 65) return 'High-risk change — senior review';
+  if (score >= 35) return 'Manual review required';
+  if (score >= 15) return 'Review recommended';
+  return 'No material risk detected in imported change';
 }
 
 function buildResourceDiffs(beforeResources, afterResources) {
@@ -734,10 +1284,13 @@ function buildResourceDiffs(beforeResources, afterResources) {
   const after = new Map((afterResources || []).map(r => [resourceIdentity(r), normalizeResource(r)]));
   const diffs = [];
   for (const [key, resource] of after) {
-    if (!before.has(key)) diffs.push({ action: 'add', resource: key, type: resource.type, description: 'Resource is present in proposed input but not the baseline.' });
-    else if (stableStringify(before.get(key).attributes) !== stableStringify(resource.attributes)) diffs.push({ action: 'change', resource: key, type: resource.type, description: 'Declared resource attributes differ from the baseline.' });
+    if (!before.has(key)) diffs.push({ action: 'add', resource: key, type: resource.type, name: resource.name, provider: resource.provider, before: null, after: resource.attributes, description: 'Resource is present in proposed input but not the baseline.' });
+    else if (stableStringify(before.get(key).attributes) !== stableStringify(resource.attributes)) {
+      const previous = before.get(key);
+      diffs.push({ action: 'change', resource: key, type: resource.type, name: resource.name, provider: resource.provider, before: previous.attributes, after: resource.attributes, description: 'Declared resource attributes differ from the baseline.' });
+    }
   }
-  for (const [key, resource] of before) if (!after.has(key)) diffs.push({ action: 'delete', resource: key, type: resource.type, description: 'Resource is absent from proposed input.' });
+  for (const [key, resource] of before) if (!after.has(key)) diffs.push({ action: 'delete', resource: key, type: resource.type, name: resource.name, provider: resource.provider, before: resource.attributes, after: null, description: 'Resource is absent from proposed input.' });
   return diffs;
 }
 

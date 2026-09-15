@@ -1,9 +1,9 @@
 {
   "name": "sable",
-  "version": "3.2.2",
+  "version": "3.3.0",
   "private": true,
   "type": "module",
-  "description": "Sable is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.",
+  "description": "S4BLE is an evidence-based cloud architecture analyzer for Terraform, CloudFormation, Kubernetes, and normalized infrastructure snapshots.",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",

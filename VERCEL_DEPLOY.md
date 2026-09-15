@@ -22,7 +22,7 @@ Open these URLs:
 - `/index.html` — should display the same application
 - `/styles.css` — should return CSS
 - `/app.js` — should return JavaScript
-- `/api/health` — should return JSON with version 3.2.2
+- `/api/health` — should return JSON with version 3.3.0
 
 If `/index.html` works but `/` does not, verify `vercel.json` is at the repository root and redeploy without build cache.
 

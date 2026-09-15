@@ -495,8 +495,8 @@ async function requestAnalysis(text, files = [], endpoint = '/api/analyze') {
 function emptyAnalysis() {
   return {
     resources: [], findings: [], grouped: Object.entries(CATEGORY_META).map(([category, meta]) => ({ ...meta, category, resources: [], findings: [] })),
-    score: 0, counts: { critical: 0, high: 0, medium: 0, low: 0 }, graph: { links: [], inferredLinks: [] }, diagnostics: [],
-    metadata: { analysisMode: 'empty', authoritative: false, scope: 'none', scoreModel: '' }
+    score: null, rating: 'Not rated', counts: { critical: 0, high: 0, medium: 0, low: 0 }, graph: { links: [], inferredLinks: [] }, diagnostics: [],
+    metadata: { analysisMode: 'empty', authoritative: false, machineReadable: false, evidenceLevel: 'none', runtimeVerified: false, scope: 'none', scoreModel: '', coverage: { importedResources: 0, supportedResources: 0, unsupportedResources: 0, supportedPercent: 0, applicableControlFamilies: 0 } }
   };
 }
 
@@ -613,8 +613,18 @@ function buildWorkspaceDescription(workspaceData = {}, analysis = emptyAnalysis(
   if (!count) return 'No infrastructure imported yet.';
   const source = humanizeToken(workspaceData.sourceType || 'workspace');
   const mode = humanizeToken(analysis.metadata?.analysisMode || workspaceData.analysisMode || 'analysis');
-  const authority = analysis.metadata?.authoritative ? 'Authoritative imported values' : 'Static source evidence';
-  return `${count} resources imported from ${source}. ${mode}. ${authority}.`;
+  const evidence = evidenceModeLabel(analysis.metadata);
+  return `${count} resources imported from ${source}. ${mode}. ${evidence}.`;
+}
+
+function evidenceModeLabel(metadata = {}) {
+  const level = metadata.evidenceLevel || '';
+  if (level === 'planned-values') return 'Terraform planned-value evidence';
+  if (level === 'state-snapshot') return 'Terraform state-snapshot evidence';
+  if (level === 'declaration-only') return 'Declarative source evidence only';
+  if (level === 'user-supplied') return 'User-supplied snapshot evidence';
+  if (metadata.machineReadable) return 'Machine-readable imported evidence';
+  return 'Static imported evidence';
 }
 
 function humanizeToken(value = '') {
@@ -626,10 +636,11 @@ function humanizeToken(value = '') {
 
 function renderOverview() {
   const hasResources = Boolean(currentAnalysis.resources?.length);
-  $('#healthScore').textContent = hasResources ? currentAnalysis.score : '—';
-  $('#scoreRingText').textContent = hasResources ? `${currentAnalysis.score}%` : '—';
-  $('#scoreRing').style.strokeDashoffset = String(hasResources ? CIRCLE_LENGTH - (CIRCLE_LENGTH * currentAnalysis.score) / 100 : CIRCLE_LENGTH);
-  $('#healthNarrative').textContent = buildHealthNarrative(currentAnalysis.score, currentAnalysis.counts, currentAnalysis.resources.length, currentAnalysis.metadata);
+  const hasScore = hasResources && Number.isFinite(currentAnalysis.score);
+  $('#healthScore').textContent = hasScore ? currentAnalysis.score : '—';
+  $('#scoreRingText').textContent = hasScore ? `${currentAnalysis.score}%` : 'N/R';
+  $('#scoreRing').style.strokeDashoffset = String(hasScore ? CIRCLE_LENGTH - (CIRCLE_LENGTH * currentAnalysis.score) / 100 : CIRCLE_LENGTH);
+  $('#healthNarrative').textContent = buildHealthNarrative(currentAnalysis.score, currentAnalysis.counts, currentAnalysis.resources.length, currentAnalysis.metadata, currentAnalysis.rating);
   $('#criticalCount').textContent = currentAnalysis.counts.critical || 0;
   $('#highCount').textContent = currentAnalysis.counts.high || 0;
   $('#mediumCount').textContent = currentAnalysis.counts.medium || 0;
@@ -640,13 +651,16 @@ function renderOverview() {
   syncPrimaryActions();
 }
 
-function buildHealthNarrative(score, counts, resourceCount, metadata = {}) {
-  if (!resourceCount) return 'Import Terraform, JSON, or YAML to calculate an evidence-based posture score.';
-  const mode = metadata.authoritative ? 'Authoritative imported values' : 'Static source evidence';
-  if ((counts.critical || 0) > 0) return `${mode} identified confirmed critical risk that should be remediated before approval.`;
-  if (score >= 90) return `${mode} shows a strong posture for the imported scope. Review remaining findings and diagnostics.`;
-  if (score >= 70) return `${mode} shows material security or reliability findings that should be reviewed.`;
-  return `${mode} shows significant risk in the imported scope. Prioritize confirmed findings first.`;
+function buildHealthNarrative(score, counts, resourceCount, metadata = {}, rating = '') {
+  if (!resourceCount) return 'Import Terraform, JSON, or YAML to run evidence-backed infrastructure checks.';
+  const coverage = metadata.coverage || {};
+  const coverageText = Number.isFinite(coverage.supportedPercent) ? `${coverage.supportedPercent}% of imported resources have an applicable built-in rule family` : 'rule coverage is unavailable';
+  const mode = evidenceModeLabel(metadata);
+  if (!Number.isFinite(score)) return `${mode}. Not rated because no built-in posture controls apply to the imported resource types. Architecture mapping and parser diagnostics are still available.`;
+  if ((counts.critical || 0) > 0) return `${mode}. ${rating || 'Critical findings detected'}. Score ${score}/100 reflects only the controls S4BLE can assess; ${coverageText}.`;
+  if ((counts.high || 0) > 0) return `${mode}. ${rating || 'High-priority findings detected'}. Score ${score}/100 is a triage index, not proof of cloud security; ${coverageText}.`;
+  if ((counts.medium || 0) > 0 || (counts.low || 0) > 0) return `${mode}. ${rating || 'Review recommended'}. Score ${score}/100 covers explicit findings only; ${coverageText}.`;
+  return `${mode}. No confirmed issues were detected by the controls currently assessed. This is not a guarantee that the environment is secure; ${coverageText}.`;
 }
 
 function renderArchitecture() {
@@ -1410,9 +1424,9 @@ function renderFindings() {
   const findings = currentAnalysis.findings.filter(finding => filter === 'all' || finding.severity === filter);
   const hasResources = currentAnalysis.resources.length > 0;
   const emptyText = hasResources
-    ? (filter === 'all' ? 'No findings were detected in the imported scope.' : `No ${filter} findings were detected in the imported scope.`)
+    ? (filter === 'all' ? 'No findings were detected by the built-in controls that apply to this imported scope.' : `No ${filter} findings were detected by the built-in controls that apply to this imported scope.`)
     : 'Import infrastructure to analyze risk.';
-  renderFindingList(container, findings, emptyText, hasResources ? 'No findings detected' : 'Nothing to show');
+  renderFindingList(container, findings, emptyText, hasResources ? 'No findings detected by assessed controls' : 'Nothing to show');
 }
 
 function renderFindingList(container, findings, emptyText, emptyTitle = 'Nothing to show') {
@@ -1427,11 +1441,13 @@ function renderFindingList(container, findings, emptyText, emptyTitle = 'Nothing
     const pill = node.querySelector('.severity-pill');
     pill.textContent = finding.severity;
     pill.classList.add(finding.severity);
-    node.querySelector('.finding-resource').textContent = `${finding.ruleId || 'Sable rule'} · ${finding.resource} · ${finding.confidence || 'confirmed'}`;
+    const findingMeta = [finding.ruleId || 'S4BLE rule', finding.resource, finding.confidence || 'confirmed', finding.kind || null, finding.reviewStatus || null].filter(Boolean);
+    node.querySelector('.finding-resource').textContent = findingMeta.join(' · ');
     node.querySelector('h3').textContent = finding.title;
     node.querySelector('p').textContent = finding.description;
     const evidence = finding.evidence ? ` Evidence: ${formatEvidence(finding.evidence)}.` : '';
-    node.querySelector('.recommendation').textContent = `${finding.recommendation}${evidence}`;
+    const limitations = finding.limitations ? ` Limitation: ${finding.limitations}` : '';
+    node.querySelector('.recommendation').textContent = `${finding.recommendation}${evidence}${limitations}`;
     const resourceExists = currentAnalysis.resources.some(resource => resourceKey(resource) === finding.resource);
     if (resourceExists) {
       const card = node.querySelector('.finding-card');
@@ -1546,7 +1562,7 @@ function renderImportPreview() {
   const analysis = preview.analysis || emptyAnalysis();
   const workspacePreview = preview.workspace || {};
   const mode = analysis.metadata?.analysisMode || workspacePreview.analysisMode || workspacePreview.sourceType || 'detected';
-  $('#detectedType').textContent = analysis.metadata?.authoritative ? `${mode} · authoritative` : `${mode} · static`;
+  $('#detectedType').textContent = `${mode} · ${humanizeToken(analysis.metadata?.evidenceLevel || (analysis.metadata?.machineReadable ? 'machine-readable' : 'declaration-only'))}`;
   $('#previewResourceCount').textContent = String(analysis.resources.length);
   $('#previewFindingCount').textContent = String(analysis.findings.length);
   $('#previewCategoryCount').textContent = String(new Set(analysis.resources.map(resource => resource.category)).size);
@@ -1555,7 +1571,12 @@ function renderImportPreview() {
     sourceType: workspacePreview.sourceType,
     analysisMode: mode,
     authoritative: analysis.metadata?.authoritative,
-    postureScore: analysis.score,
+    machineReadable: analysis.metadata?.machineReadable,
+    evidenceLevel: analysis.metadata?.evidenceLevel,
+    runtimeVerified: analysis.metadata?.runtimeVerified,
+    evidenceScore: analysis.score,
+    rating: analysis.rating,
+    ruleCoverage: analysis.metadata?.coverage,
     diagnostics: analysis.diagnostics,
     resources: analysis.resources,
     relationships: analysis.graph,
@@ -1569,17 +1590,25 @@ function updateAccuracyNote(analysis) {
   const note = $('#analysisAccuracyNote');
   if (!note) return;
   if (!analysis) {
-    note.textContent = 'For authoritative Terraform analysis, import JSON produced by terraform show -json from a plan or state. Raw .tf uses static HCL analysis and is clearly marked as non-authoritative.';
+    note.textContent = 'For the strongest Terraform evidence, import terraform show -json from a saved plan. Raw .tf, CloudFormation templates, Kubernetes manifests, and snapshots are declaration-level analysis and cannot prove live cloud reachability or runtime state.';
     return;
   }
   if (analysis.error) {
     note.textContent = analysis.error;
     return;
   }
-  const authoritative = analysis.metadata?.authoritative;
-  note.textContent = authoritative
-    ? `Evidence mode: authoritative for the imported ${analysis.metadata?.scope || 'document'} scope. Sable does not claim resources outside that scope.`
-    : 'Evidence mode: static source analysis. Declared HCL syntax and references are parsed accurately, but runtime values, module internals, count/for_each instances, and provider defaults require Terraform plan/state JSON.';
+  const level = analysis.metadata?.evidenceLevel || 'declaration-only';
+  const coverage = analysis.metadata?.coverage;
+  const coverageText = coverage ? ` Built-in rule coverage applies to ${coverage.supportedResources}/${coverage.importedResources} imported resources (${coverage.supportedPercent}%).` : '';
+  if (level === 'planned-values') {
+    note.textContent = `Evidence mode: Terraform planned values and change actions. This is high-confidence evidence for the supplied plan, but S4BLE does not query the live cloud control plane or organization/account policies.${coverageText}`;
+  } else if (level === 'state-snapshot') {
+    note.textContent = `Evidence mode: Terraform state snapshot. Values are read from the supplied state, but S4BLE cannot prove the state is current or drift-free without querying the cloud provider.${coverageText}`;
+  } else if (level === 'declaration-only') {
+    note.textContent = `Evidence mode: declarative source only. Findings are limited to properties explicitly present in the imported source; provider defaults, runtime mutations, remote module internals, and live-state controls are not invented.${coverageText}`;
+  } else {
+    note.textContent = `Evidence mode: imported snapshot declarations. S4BLE does not independently verify those values against a cloud control plane.${coverageText}`;
+  }
 }
 
 async function reviewPrRisk() {
@@ -1591,7 +1620,10 @@ async function reviewPrRisk() {
   try {
     const result = await requestAnalysis(text, pendingReviewFiles, '/api/review');
     prReview = {
-      findings: result.analysis?.findings || [],
+      findings: result.review?.findings || result.analysis?.findings || [],
+      introducedFindings: result.review?.introducedFindings || [],
+      existingFindings: result.review?.existingFindings || [],
+      resolvedFindings: result.review?.resolvedFindings || [],
       diffs: result.review?.diffs || [],
       counts: result.review?.counts || { add: 0, change: 0, delete: 0 },
       riskScore: result.review?.riskScore ?? 0,
@@ -1656,7 +1688,7 @@ function exportPrReport() {
     '# Terraform PR Risk Review',
     '',
     `Decision: **${prReview.decision}**`,
-    `Risk Score: **${prReview.riskScore}/100**`,
+    `Change Risk Score: **${prReview.riskScore}/100**`,
     '',
     '## Change Counts',
     `- Add: ${prReview.counts.add || 0}`,
@@ -1666,8 +1698,12 @@ function exportPrReport() {
     '## Resource Diff',
     ...(prReview.diffs.length ? prReview.diffs.map(diff => `- **${diff.action.toUpperCase()}** ${diff.resource}: ${diff.description}`) : ['No diff detected.']),
     '',
-    '## Findings',
-    ...(prReview.findings.length ? prReview.findings.sort(compareFindings).map(finding => `- **${finding.severity.toUpperCase()}** [${finding.confidence || 'confirmed'}] ${finding.ruleId || 'Sable'} ${finding.resource}: ${finding.title}: ${finding.recommendation}`) : ['No findings.'])
+    '## Findings on changed resources',
+    ...(prReview.findings.length ? prReview.findings.sort(compareFindings).map(finding => `- **${finding.severity.toUpperCase()}** [${finding.confidence || 'confirmed'}] [${finding.reviewStatus || 'change-related'}] ${finding.ruleId || 'S4BLE'} ${finding.resource}: ${finding.title}: ${finding.recommendation}${finding.limitations ? ` Limitation: ${finding.limitations}` : ''}`) : ['No findings on changed resources.']),
+    '',
+    `Introduced/newly-detectable findings: **${prReview.introducedFindings?.length || 0}**`,
+    `Pre-existing findings on changed resources: **${prReview.existingFindings?.length || 0}**`,
+    `Resolved findings: **${prReview.resolvedFindings?.length || 0}**`
   ];
   downloadFile('sable-pr-review.md', lines.join('\n'), 'text/markdown');
 }
@@ -1680,10 +1716,13 @@ function buildMarkdownReport(title, analysis, workspaceObj) {
     `Imported: **${workspaceObj.importedAt || 'N/A'}**`,
     `Source: **${workspaceObj.sourceType || 'N/A'}**`,
     '',
-    `Sable Posture Score: **${analysis.score}/100**`,
+    `S4BLE Evidence Score: **${Number.isFinite(analysis.score) ? `${analysis.score}/100` : 'Not rated'}**`,
+    `Rating: **${analysis.rating || 'N/A'}**`,
     `Analysis Mode: **${analysis.metadata?.analysisMode || 'N/A'}**`,
-    `Authoritative for Imported Scope: **${analysis.metadata?.authoritative ? 'Yes' : 'No'}**`,
+    `Evidence Level: **${analysis.metadata?.evidenceLevel || 'N/A'}**`,
+    `Runtime Verified: **${analysis.metadata?.runtimeVerified ? 'Yes' : 'No'}**`,
     `Resources: **${analysis.resources.length}**`,
+    `Built-in Rule Coverage: **${analysis.metadata?.coverage ? `${analysis.metadata.coverage.supportedResources}/${analysis.metadata.coverage.importedResources} resources (${analysis.metadata.coverage.supportedPercent}%)` : 'N/A'}**`,
     '',
     '## Finding Summary',
     `- Critical: ${analysis.counts.critical || 0}`,
@@ -1692,7 +1731,7 @@ function buildMarkdownReport(title, analysis, workspaceObj) {
     `- Low: ${analysis.counts.low || 0}`,
     '',
     '## Findings',
-    ...(analysis.findings.length ? analysis.findings.sort(compareFindings).map(finding => `- **${finding.severity.toUpperCase()}** [${finding.confidence || 'confirmed'}] ${finding.ruleId || 'Sable'} ${finding.resource}: ${finding.title}: ${finding.recommendation}`) : ['No findings.']),
+    ...(analysis.findings.length ? analysis.findings.sort(compareFindings).map(finding => `- **${finding.severity.toUpperCase()}** [${finding.confidence || 'confirmed'}] ${finding.ruleId || 'S4BLE'} ${finding.resource}: ${finding.title}: ${finding.recommendation}${finding.limitations ? ` Limitation: ${finding.limitations}` : ''}`) : ['No findings.']),
     '',
     '## Resource Inventory',
     ...analysis.resources.map(resource => `- ${resource.type}.${resource.name} (${resource.category})`)
