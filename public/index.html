@@ -11,8 +11,12 @@
   <link rel="icon" type="image/png" sizes="16x16" href="assets/sable-favicon-16.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="assets/sable-apple-touch-icon.png" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="polish.css" />
+  <link rel="stylesheet" href="architecture.css" />
 </head>
-<body data-theme="light" class="loading">
+<body data-theme="light">
+  <a class="skip-link" href="#mainContent">Skip to workspace</a>
+  <noscript><p class="no-script">S4BLE needs JavaScript to analyze infrastructure. Enable JavaScript and reload this page.</p></noscript>
   <div class="sable-loader" id="sableLoader" role="status" aria-live="polite" aria-label="Loading S4BLE workspace">
     <div class="sable-loader__inner">
       <div class="sable-loader__animal-stage" id="sableLoaderStage" aria-hidden="true">
@@ -60,6 +64,8 @@
           <span class="nav-icon">↓</span>
           <span class="nav-label"><span class="nav-label-long">Import Terraform / JSON / YAML</span><span class="nav-label-short">Import</span></span>
         </button>
+        <button class="nav-item" data-route="inventory"><span class="nav-icon">▦</span><span class="nav-label">Resource Explorer</span></button>
+        <button class="nav-item" data-route="learn"><span class="nav-icon">◉</span><span class="nav-label">Cloud Guide</span></button>
       </nav>
 
       <div class="sidebar-card">
@@ -69,7 +75,7 @@
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="mainContent" tabindex="-1">
       <header class="topbar">
         <div>
           <p class="eyebrow" id="routeEyebrow">Cloud Infrastructure Review</p>
@@ -91,6 +97,7 @@
             <p class="eyebrow">Current workspace</p>
             <h2 id="workspaceDisplayName">No workspace loaded</h2>
             <p id="workspaceDescription">No infrastructure imported yet.</p>
+            <button class="secondary-button" type="button" id="refreshWorkspaceBtn" hidden>Refresh analysis</button>
           </div>
           <div class="workspace-banner-meta">
             <div><strong id="workspaceSourceType">—</strong><span>Source</span></div>
@@ -159,8 +166,9 @@
             <svg class="connection-layer" id="connectionLayer" aria-hidden="true"></svg>
             <div class="architecture-empty" id="architectureEmpty">
               <h3>No architecture loaded</h3>
-              <p>Import Terraform, JSON, or YAML to preview your infrastructure.</p>
+              <p>Bring your infrastructure into focus. Import Terraform, JSON, or YAML to explore resources and their dependencies.</p>
               <button class="primary-button" type="button" data-open-import-picker>Import infrastructure</button>
+              <button class="secondary-button" id="tryExampleBtn" type="button">Explore an example</button>
             </div>
             <div class="architecture-grid" id="architectureGrid"></div>
             <div class="architecture-explorer hidden" id="architectureExplorer" aria-live="polite">
@@ -173,10 +181,12 @@
                 <div class="explorer-actions">
                   <button class="secondary-button explorer-mode active" id="internalMapBtn" data-graph-mode="internal">Category only</button>
                   <button class="secondary-button explorer-mode" id="contextMapBtn" data-graph-mode="context">Show cloud context</button>
+                  <button class="secondary-button" id="connectionModeBtn" type="button" aria-pressed="false" title="Switch between tracing a resource and showing every connection">Trace resource</button>
                   <button class="secondary-button" id="fitExplorerBtn" type="button" title="Reset zoom to show more of the map">Fit view</button>
                   <button class="icon-button" id="closeExplorerBtn" type="button" title="Back to category overview" aria-label="Back to category overview">×</button>
                 </div>
               </div>
+              <p class="connection-status" id="connectionStatus" role="status"></p>
               <div class="explorer-stage" id="explorerStage" tabindex="0" aria-label="Architecture diagram viewport. Two-finger scroll to pan, pinch to zoom, or drag empty space to move around the diagram.">
                 <div class="explorer-lane-header-layer" id="explorerLaneHeaders" aria-hidden="true"></div>
                 <svg class="explorer-connections" id="explorerConnections" aria-hidden="true"></svg>
@@ -256,7 +266,9 @@
                 </label>
               </div>
             </div>
-            <textarea id="prInput" class="code-editor" spellcheck="false" placeholder="Paste Terraform HCL or machine-readable terraform show -json output. Human-readable terraform plan text is intentionally rejected for correctness."></textarea>
+            <textarea aria-label="Infrastructure source to review" id="prInput" class="code-editor" spellcheck="false" placeholder="Paste Terraform HCL or machine-readable terraform show -json output. Human-readable terraform plan text is intentionally rejected for correctness."></textarea>
+            <p class="privacy-note">Selected files and pasted source are sent to this site’s server only when you select Review PR risk. Remove credentials and secrets before reviewing.</p>
+            <p id="reviewStatus" class="operation-status" role="status" aria-live="polite"></p>
             <div class="editor-actions">
               <button class="secondary-button" id="clearPrBtn">Clear</button>
               <button class="secondary-button" id="setBaselineBtn">Set current workspace as baseline</button>
@@ -322,15 +334,17 @@
               <input type="file" id="fileInput" hidden multiple accept=".tf,.tf.json,.json,.yaml,.yml" />
               <div>
                 <strong>Choose or drop infrastructure files</strong>
-                <span>Supports Terraform (.tf / .tf.json), JSON, YAML, and YML. Multiple Terraform or YAML files can be selected together.</span>
+                <span>Supports Terraform (.tf / .tf.json), JSON, YAML, and YML. Multiple Terraform, Kubernetes JSON, or YAML files can be selected together.</span>
               </div>
             </div>
             <div class="import-file-summary" id="importFileSummary" aria-live="polite">No files selected.</div>
 
-            <textarea id="importInput" class="code-editor tall" spellcheck="false" placeholder="Paste Terraform HCL, terraform show -json plan/state, CloudFormation JSON/YAML, Kubernetes YAML, or a normalized Sable snapshot..."></textarea>
+            <textarea aria-label="Infrastructure source to analyze" id="importInput" class="code-editor tall" spellcheck="false" placeholder="Paste Terraform HCL, terraform show -json plan/state, CloudFormation JSON/YAML, Kubernetes YAML, or a normalized Sable snapshot..."></textarea>
 
             <p class="analysis-accuracy-note" id="analysisAccuracyNote">For the strongest Terraform evidence, import JSON produced by terraform show -json from a saved plan. Static source analysis cannot prove live cloud reachability, drift, or organization/account controls.</p>
 
+            <p class="privacy-note">Select Analyze workspace to send this input to this site’s server. Results are saved in this browser. Remove credentials and secrets before importing.</p>
+            <p id="importStatus" class="operation-status" role="status" aria-live="polite"></p>
             <div class="editor-actions stacked-mobile">
               <button class="secondary-button" id="chooseImportFilesBtn" type="button">Import infrastructure</button>
               <button class="ghost-button" id="clearImportBtn" type="button">Clear</button>
@@ -355,6 +369,27 @@
           </aside>
         </div>
       </section>
+      <section class="page" id="inventoryPage" aria-labelledby="routeTitle">
+        <section class="panel product-intro"><p class="eyebrow">Your imported infrastructure</p><h2>Know what you are running</h2><p>Find resources, inspect their declared configuration, and understand their role. Values come from your import; live utilization and billing are not measured.</p><div id="productInventoryStats" class="product-stats"></div></section>
+        <section class="panel"><div class="panel-header product-filters">
+          <label>Search resources<input id="productResourceSearch" class="text-input" type="search" placeholder="Name, address, type, or tag…" /></label>
+          <label>Provider<select id="productProvider" class="select-input"><option value="all">All providers</option></select></label>
+          <label>Category<select id="productCategory" class="select-input"><option value="all">All categories</option></select></label>
+          <label>Findings<select id="productRisk" class="select-input"><option value="all">All resources</option><option value="findings">With findings</option><option value="none">No detected findings</option></select></label>
+          <button type="button" id="productExportInventory" class="secondary-button">Export filtered CSV</button>
+        </div><p class="product-result-count" id="productInventoryCount" role="status"></p><div class="product-table-wrap"><table class="resource-table product-table"><thead><tr><th>Resource</th><th>Role / provider</th><th>Declared size / location</th><th>Findings</th><th>Inspect</th></tr></thead><tbody id="productInventoryBody"></tbody></table></div></section>
+      </section>
+      <section class="page" id="learnPage" aria-labelledby="routeTitle">
+        <section class="panel product-intro"><p class="eyebrow">From configuration to understanding</p><h2>Make sense of your cloud</h2><p>Short explanations, examples from your workspace, and a safe place to explore how configuration changes affect findings.</p><label class="product-guide-search">Find a concept<input id="productGuideSearch" class="text-input" type="search" placeholder="Try IAM, backup, public IP, or containers…" /></label></section>
+        <div id="productLessons" class="product-lessons"></div>
+        <section class="panel product-lab" id="productLab"><div class="panel-header"><div><p class="eyebrow">Practice environment</p><h2>Try a change. Understand the result.</h2></div></div>
+          <p>These fictional examples use the same analyzer as your workspace. Analyze an example without changing your workspace, or select Open example workspace to explore its architecture. Nothing is deployed.</p>
+          <div class="product-filters"><label>Example<select id="productLabExample" class="select-input"><option value="aws">AWS · instance and database</option><option value="azure">Azure · network access</option><option value="gcp">GCP · firewall</option><option value="kubernetes">Kubernetes · container privileges</option></select></label><label>Configuration<select id="productLabVariant" class="select-input"><option value="before">Needs review</option><option value="after">More restricted example</option></select></label><button class="primary-button" id="productRunLab" type="button">Analyze example</button><button class="secondary-button" id="productDownloadLab" type="button">Download example</button></div>
+          <p id="productLabDescription"></p><details><summary>See example configuration</summary><pre class="iv-config" id="productLabSource"></pre></details><div id="productLabResult" aria-live="polite" class="product-lab-result">Choose an example and run the analysis.</div>
+        </section>
+        <section class="panel product-intro"><p class="eyebrow">Quick understanding check</p><h2>Does a public IP prove internet access?</h2><div class="product-quiz" role="group" aria-label="Knowledge check"><button class="secondary-button" data-product-answer="yes" type="button">Yes, always</button><button class="secondary-button" data-product-answer="no" type="button">No, other controls matter</button></div><p id="productQuizFeedback" role="status">Choose an answer to see the explanation.</p></section>
+      </section>
+      <footer class="workspace-footer"><span>S4BLE · Evidence-based infrastructure review</span><span>Workspace data is saved in this browser. <button type="button" id="clearWorkspaceBtn">Clear local data</button></span></footer>
     </main>
   </div>
 
@@ -372,7 +407,9 @@
     </article>
   </template>
 
+  <script src="diagram-routing.js"></script>
   <script src="app.js"></script>
   <script src="features.js"></script>
+  <script type="module" src="product.js"></script>
 </body>
 </html>

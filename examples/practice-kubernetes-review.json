@@ -1,0 +1,45 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "practice-app",
+    "namespace": "practice"
+  },
+  "spec": {
+    "replicas": 2,
+    "selector": {
+      "matchLabels": {
+        "app": "practice"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "practice"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "app",
+            "image": "example.invalid/practice:v1",
+            "securityContext": {
+              "privileged": true,
+              "allowPrivilegeEscalation": true,
+              "runAsNonRoot": false,
+              "runAsUser": 0,
+              "capabilities": {
+                "add": [
+                  "SYS_ADMIN"
+                ]
+              },
+              "seccompProfile": {
+                "type": "Unconfined"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -2593,3 +2593,75 @@ body.loading {
 @media (max-width: 760px) {
   .brand-wordmark { width: 82px; max-height: 38px; }
 }
+
+/* Product learning and review tools reuse the existing S4BLE design tokens. */
+.product-intro, .product-lesson, .product-lab, .product-checklist { padding: 22px; }
+.product-intro > p, .product-lesson > p, .product-lab > p, .product-checklist > p { color: var(--ink-soft); line-height: 1.65; max-width: 90ch; }
+.product-intro h2, .product-lesson h2 { margin: 8px 0 12px; }
+.product-stats { display: flex; gap: 38px; flex-wrap: wrap; margin-top: 24px; }
+.product-stats strong { display: block; font-size: 28px; color: var(--ink); }
+.product-stats span, .product-result-count { color: var(--muted); font-size: 13px; }
+.product-filters { display: flex; align-items: end; gap: 14px; flex-wrap: wrap; }
+.product-filters label, .product-guide-search { display: grid; gap: 7px; font-size: 12px; font-weight: 600; min-width: 130px; }
+.product-filters label:first-child { flex: 1; }
+.product-filters input, .product-guide-search input { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--ink); padding: 10px 12px; min-height: 40px; font: inherit; width: 100%; }
+.product-filters select { max-width: 100%; min-height: 40px; }
+.product-guide-search { max-width: 500px; margin-top: 20px; }
+.product-result-count { margin: 0 20px 14px; }
+.product-table-wrap { overflow-x: auto; }
+.product-table { width: 100%; border-collapse: collapse; text-align: left; }
+.product-table th { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.product-table td, .product-table th { padding: 16px 20px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.product-table td { font-size: 13px; }
+.product-table td code, .product-table td span { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.product-table td:first-child { min-width: 200px; max-width: 450px; }
+.product-lessons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.product-lesson h2 { font-size: 20px; }
+.product-equivalents { font-size: 12px; color: var(--muted) !important; }
+.product-lesson details, .product-lab details { margin-top: 18px; }
+.product-lesson summary, .product-lab summary, .product-action summary { cursor: pointer; font-size: 13px; font-weight: 650; color: var(--ink); line-height: 1.5; }
+.product-lesson details p, .product-lesson li, .product-lab-result p, .product-action p { color: var(--ink-soft); font-size: 13px; line-height: 1.65; }
+.product-lesson li { margin: 8px 0; }
+.product-callout { padding: 12px; border-left: 3px solid var(--cobalt); background: var(--surface-2); }
+.product-lesson a { color: var(--cobalt); font-size: 13px; }
+.product-resource-links, .product-quiz { display: flex; flex-wrap: wrap; gap: 8px; }
+.product-resource-links button { overflow-wrap: anywhere; text-align: left; }
+.product-lab .iv-config, .product-action .iv-config { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.product-lab-result { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 18px; margin-top: 18px; font-size: 14px; }
+.product-lab-finding { padding-top: 12px; border-top: 1px solid var(--line); }
+.product-checklist .product-filters { margin: 20px 0; align-items: center; }
+.product-checklist .product-filters label:first-child { flex: 0 1 190px; }
+.product-checklist .product-filters span { color: var(--muted); font-size: 13px; }
+.product-action { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 16px; padding: 20px 0; border-top: 1px solid var(--line); }
+.product-action > label { display: flex; align-items: start; gap: 7px; font-size: 12px; }
+.product-action input { accent-color: var(--cobalt); }
+.product-action h3 { margin: 9px 0; font-size: 15px; }
+.product-action code { overflow-wrap: anywhere; font-size: 12px; color: var(--muted); }
+#inventoryPage, #learnPage { min-width: 0; }
+@media (max-width: 760px) {
+  .product-lessons { grid-template-columns: 1fr; }
+  .product-intro, .product-lesson, .product-lab, .product-checklist { padding: 16px; }
+  .product-filters > label { flex: 1 1 150px; min-width: 0; }
+  .product-action { grid-template-columns: 1fr; gap: 12px; }
+  .product-stats { gap: 24px; }
+}
+#inventoryPage > * + *, #learnPage > * + * { margin-top: 20px; }
+/* Keep all five navigation destinations readable at the original breakpoints. */
+.nav-stack { overflow-x: auto; justify-content: flex-start; }
+.nav-item { flex: 0 0 auto; }
+@media (max-width: 1600px) {
+  .nav-label-long { display: none; }
+  .nav-label-short { display: inline; }
+}
+@media (max-width: 660px) {
+  .nav-stack { overflow-x: auto; overflow-y: hidden; justify-content: flex-start !important; }
+  .nav-item { flex: 0 0 auto; min-width: max-content; padding: 9px 11px; }
+  .product-filters { flex-direction: row; align-items: end; }
+}
+
+/* Readable architecture connections, matching the existing palette. */
+.connection-status { margin: 0; padding: 8px 18px; font-size: 11px; line-height: 1.5; color: var(--muted); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.category-connection-line { stroke-width: 1.5; opacity: .65; }
+.explorer-connections .explorer-link { stroke-width: 1.4; opacity: .55; }
+.explorer-connections .explorer-link.focused { stroke-width: 2.2; opacity: 1; }
+.explorer-connections .explorer-link:hover { stroke: var(--wire); stroke-width: 2.8; opacity: 1; }

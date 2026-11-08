@@ -1,0 +1,149 @@
+/* Architecture workspace: topology, connection hierarchy, and accessible controls. */
+body { --diagram-ground: #f5f7ff; }
+body[data-theme="dark"] { --diagram-ground: #151a28; }
+.architecture-header { gap: 18px; }
+.architecture-header .eyebrow { display: block; color: var(--muted); font-size: 10px; letter-spacing: .13em; }
+.architecture-header h2 { margin-top: 5px; }
+.architecture-actions .hint { max-width: 280px; font-size: 11px; line-height: 1.6; }
+.architecture-panel:not(.maximized) .architecture-canvas { height: 570px; min-height: 570px; max-height: 570px; }
+.architecture-canvas, body[data-theme="dark"] .architecture-canvas {
+  background-color: var(--diagram-ground);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--wire-muted) 27%, transparent) .8px, transparent .9px);
+  background-size: 20px 20px;
+}
+.architecture-grid {
+  width: max(100%, calc(1000px * var(--architecture-zoom)));
+  min-height: calc(540px * var(--architecture-zoom));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: none;
+  grid-auto-rows: minmax(calc(178px * var(--architecture-zoom)), auto);
+  gap: calc(76px * var(--architecture-zoom)) calc(88px * var(--architecture-zoom));
+  padding: calc(52px * var(--architecture-zoom));
+  align-content: start;
+  pointer-events: none;
+}
+.arch-category-node { grid-column: auto; grid-row: auto; pointer-events: auto; text-align: left; font: inherit; }
+.arch-node {
+  --category-accent: var(--cobalt);
+  min-height: calc(178px * var(--architecture-zoom));
+  padding: calc(18px * var(--architecture-zoom));
+  border: 1px solid var(--line-strong);
+  border-radius: calc(13px * var(--architecture-zoom));
+  background: var(--surface);
+  box-shadow: 0 3px 6px #17263d05, 0 12px 25px #17263d06;
+  transition: border-color .16s, box-shadow .16s, background .16s;
+}
+.arch-node:hover, body[data-theme="dark"] .arch-node:hover { background: var(--surface); border-color: var(--category-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--category-accent) 10%, transparent), 0 10px 24px #17263d0a; }
+.arch-pos-network { --category-accent: var(--cobalt); }
+.arch-pos-security { --category-accent: var(--cobalt); }
+.arch-pos-compute { --category-accent: var(--cobalt); }
+.arch-pos-data { --category-accent: var(--cobalt); }
+.arch-pos-storage { --category-accent: var(--cobalt); }
+.arch-pos-observability { --category-accent: var(--cobalt); }
+.arch-node .node-icon { border-radius: calc(10px * var(--architecture-zoom)); color: var(--cobalt); background: var(--cobalt-soft); }
+.arch-node h3 { font-size: calc(14px * var(--architecture-zoom)); line-height: 1.4; letter-spacing: -.02em; }
+.arch-node .count { font-size: calc(10px * var(--architecture-zoom)); line-height: 1.5; }
+.arch-node .node-risk-row { gap: calc(4px * var(--architecture-zoom)); margin-top: calc(16px * var(--architecture-zoom)); }
+.arch-node .risk-chip { font-size: calc(9px * var(--architecture-zoom)); padding: calc(4px * var(--architecture-zoom)) calc(6px * var(--architecture-zoom)); }
+.category-preview { gap: calc(7px * var(--architecture-zoom)); margin-top: calc(15px * var(--architecture-zoom)); padding-top: calc(12px * var(--architecture-zoom)); border-top-style: solid; border-color: var(--line); }
+.category-preview span { flex-basis: 100%; font-size: calc(10px * var(--architecture-zoom)); }
+.category-preview strong { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: calc(10px * var(--architecture-zoom)); font-weight: 600; }
+.category-preview strong span { flex-basis: auto; color: var(--category-accent); font-size: inherit; }
+.connection-line.category-connection-line, .explorer-connections .explorer-link { stroke: var(--wire-muted); stroke-width: 1.7; opacity: .85; stroke-linecap: round; stroke-linejoin: round; }
+.connection-line.inferred, .explorer-connections .explorer-link.inferred { stroke-dasharray: 5 5; opacity: .7; }
+.explorer-connections .explorer-link.focused { stroke: var(--wire); stroke-width: 2.3; opacity: 1; }
+.explorer-connections .explorer-link.focused.inferred { stroke-dasharray: 5 5; }
+.explorer-connections .explorer-link:hover { stroke: var(--wire); stroke-width: 3; opacity: 1; }
+.explorer-connections.has-selection .explorer-link:not(.focused) { opacity: .23; }
+.connection-halo { fill: none; stroke: var(--diagram-ground); stroke-width: 6; stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
+.connection-count { pointer-events: none; }
+.connection-count rect { fill: var(--surface); stroke: color-mix(in srgb, var(--wire-muted) 32%, var(--surface)); }
+.connection-count text { fill: var(--ink-soft); font: 600 10px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+.explorer-lane { border-right: 1px solid color-mix(in srgb, var(--wire-muted) 15%, transparent); background: transparent; }
+.explorer-lane.active { background: color-mix(in srgb, var(--wire) 3%, transparent); }
+.explorer-lane-header-layer, body[data-theme="dark"] .explorer-lane-header-layer { background: color-mix(in srgb, var(--surface) 96%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--wire-muted) 18%, transparent); }
+.explorer-lane-header span, body[data-theme="dark"] .explorer-lane-header span { background: transparent; box-shadow: none; border: none; color: var(--muted); font-size: 10px; letter-spacing: .1em; }
+.explorer-lane-header.active span { color: var(--wire); }
+/* Empty diagram space must pass pointer events to the SVG connections below. */
+.explorer-node-layer { pointer-events: none; }
+.resource-map-node { pointer-events: auto; padding: calc(15px * var(--node-zoom)); gap: calc(4px * var(--node-zoom)); border-radius: calc(11px * var(--node-zoom)); border-color: var(--line-strong); background: var(--surface); box-shadow: 0 3px 8px #17263d07; }
+.resource-map-node strong { font-size: calc(13px * var(--node-zoom)); letter-spacing: -.015em; line-height: 1.35; }
+.resource-map-node span { font-size: calc(9px * var(--node-zoom)); line-height: 1.4; margin-top: calc(2px * var(--node-zoom)); }
+.resource-map-node small { padding-top: calc(5px * var(--node-zoom)); font-size: calc(9px * var(--node-zoom)); letter-spacing: .04em; color: var(--muted); }
+.resource-map-node.critical small { color: var(--critical); }
+.resource-map-node.high small { color: var(--high); }
+.resource-map-node.medium small { color: var(--medium); }
+.resource-map-node.selected { border-color: var(--wire); box-shadow: 0 0 0 3px color-mix(in srgb, var(--wire) 16%, transparent); background: var(--surface); }
+.resource-map-node.context-resource { opacity: 1; }
+.arch-node:focus-visible, .resource-map-node:focus-visible { outline: 3px solid var(--wire); outline-offset: 4px; }
+.connection-status { background: var(--surface); border-bottom: 1px solid var(--line); }
+.relationship-summary { margin: 0 0 3px; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.relationship-more { width: 100%; }
+.explorer-empty { display: none; }
+.architecture-panel:not(.maximized) #fitExplorerBtn,
+.architecture-panel:not(.maximized) .explorer-actions .secondary-button:not(.active) { display: inline-flex; }
+@media (max-width: 760px) {
+  .architecture-panel:not(.maximized) .architecture-canvas { height: 620px; min-height: 620px; max-height: 620px; }
+  .architecture-grid { width: max(100%, calc(720px * var(--architecture-zoom))); grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(58px * var(--architecture-zoom)); padding: calc(40px * var(--architecture-zoom)); }
+  .arch-category-node { grid-column: auto; grid-row: auto; }
+  .architecture-actions .hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .arch-node, .resource-map-node { transition: none; } }
+
+/* Keep the map usable on laptop-height screens; supplementary evidence is opt-in. */
+.relationship-panel-toggle { display: none; }
+.architecture-panel.maximized { overflow-y: auto; }
+.architecture-panel.maximized .architecture-header { min-height: 60px; padding: 10px 16px; flex-direction: row; align-items: center; }
+.architecture-panel.maximized .architecture-header h2 { font-size: 16px; margin: 0; }
+.architecture-panel.maximized .architecture-header .eyebrow,
+.architecture-panel.maximized .architecture-actions .hint { display: none; }
+.architecture-panel.maximized .architecture-actions { width: auto; flex: 0 0 auto; }
+.architecture-panel.maximized .iv-commandbar { flex: 0 0 auto; grid-template-columns: minmax(160px,1fr) auto auto auto auto; gap: 8px; padding: 8px 12px; }
+.architecture-panel.maximized .iv-search-wrap { grid-column: auto; }
+.architecture-panel.maximized .iv-search-help { display: none; }
+.architecture-panel.maximized .iv-field-inline .iv-select { min-width: 100px; max-width: 145px; }
+.architecture-panel.maximized .iv-command-status { margin: 0; padding: 0; font-size: 10px; }
+.architecture-panel.maximized .explorer-toolbar { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; min-height: 0; gap: 8px; padding: 10px 14px; }
+.architecture-panel.maximized .explorer-toolbar > div:first-child { flex: 1 1 180px; width: auto; }
+.architecture-panel.maximized .explorer-toolbar h3 { font-size: 15px; }
+.architecture-panel.maximized #explorerEyebrow,
+.architecture-panel.maximized #explorerSummary { display: none; }
+.architecture-panel.maximized .explorer-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 6px; width: auto; }
+.architecture-panel.maximized .explorer-actions > * { flex: 0 0 auto; width: auto; font-size: 11px; min-height: 34px; padding: 6px 9px; }
+.architecture-panel.maximized .architecture-canvas { flex: 1 0 380px; min-height: 380px; }
+.architecture-panel.maximized .explorer-stage { min-height: 260px; }
+.architecture-panel.maximized .explorer-footer { display: none; max-height: 160px; flex: 0 0 auto; }
+.architecture-panel.maximized .explorer-footer.is-open { display: grid; }
+.architecture-panel.maximized .relationship-panel-toggle { display: block; flex: 0 0 auto; min-height: 34px; padding: 8px 14px; border: 0; border-top: 1px solid var(--line); color: var(--ink-soft); background: var(--surface); font: 600 11px var(--font-sans); text-align: left; cursor: pointer; }
+.architecture-panel.maximized .relationship-panel-toggle:hover { background: var(--surface-2); }
+@media (max-width: 820px) {
+  .architecture-panel.maximized .iv-commandbar { grid-template-columns: minmax(140px,1fr) auto auto; }
+  .architecture-panel.maximized .iv-field-inline { width: auto; }
+  .architecture-panel.maximized .iv-confidence { width: auto; }
+  .architecture-panel.maximized .iv-tools-menu { width: auto; }
+}
+@media (max-width: 540px) {
+  .architecture-panel.maximized { inset: 4px; max-height: calc(100dvh - 8px); }
+  .architecture-panel.maximized .architecture-header { padding: 8px 10px; gap: 6px; }
+  .architecture-panel.maximized .architecture-header h2 { font-size: 13px; }
+  .architecture-panel.maximized .iv-commandbar { grid-template-columns: minmax(0,1fr) auto; }
+  .architecture-panel.maximized .iv-search-wrap { grid-column: 1 / -1; }
+  .architecture-panel.maximized .iv-confidence { grid-column: 1 / -1; }
+  .architecture-panel.maximized .iv-saved-view-field { grid-row: 4; }
+  .architecture-panel.maximized .iv-tools-menu { grid-column: 2; grid-row: 4; }
+  .architecture-panel.maximized .explorer-actions { display: flex; }
+  .architecture-panel.maximized .explorer-actions > *,
+  .architecture-panel.maximized #closeExplorerBtn { width: auto; flex: 0 0 auto; }
+}
+.architecture-panel.maximized .architecture-canvas { flex-basis: 420px; min-height: 420px; }
+.architecture-panel.maximized .architecture-canvas:has(.explorer-footer.is-open) { flex-basis: 580px; min-height: 580px; }
+@media (max-width: 820px) { .architecture-panel.maximized .architecture-canvas { flex-basis: 480px; min-height: 480px; } }
+@media (min-width: 760px) {
+  .architecture-panel.maximized .architecture-header > div:first-child { flex: 1 1 auto; min-width: 0; }
+  .architecture-panel.maximized .architecture-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; }
+  .architecture-panel.maximized .architecture-actions .zoom-controls { flex: 0 0 auto; width: auto; }
+  .architecture-panel.maximized #maximizeArchitectureBtn { flex: 0 0 40px; }
+}
+
+/* Preserve the original dark lane-header surface without changing geometry. */
+body[data-theme="dark"] .explorer-lane-header-layer { background: color-mix(in srgb, #17191f 96%, transparent); }

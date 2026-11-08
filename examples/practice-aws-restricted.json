@@ -1,0 +1,67 @@
+{
+  "workspace": "Practice · AWS application",
+  "resources": [
+    {
+      "id": "aws_vpc.practice",
+      "type": "aws_vpc",
+      "name": "practice-vpc",
+      "attributes": {
+        "cidr_block": "10.20.0.0/16"
+      }
+    },
+    {
+      "id": "aws_security_group.admin",
+      "type": "aws_security_group",
+      "name": "admin-access",
+      "attributes": {
+        "ingress": [
+          {
+            "protocol": "tcp",
+            "from_port": 22,
+            "to_port": 22,
+            "cidr_blocks": [
+              "10.20.0.0/16"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "aws_instance.app",
+      "type": "aws_instance",
+      "name": "app-server",
+      "attributes": {
+        "instance_type": "t3.small",
+        "availability_zone": "us-east-1a",
+        "associate_public_ip_address": false,
+        "tags": {
+          "Environment": "practice",
+          "Owner": "platform"
+        }
+      }
+    },
+    {
+      "id": "aws_db_instance.app",
+      "type": "aws_db_instance",
+      "name": "app-database",
+      "attributes": {
+        "instance_class": "db.t3.micro",
+        "publicly_accessible": false,
+        "storage_encrypted": true,
+        "backup_retention_period": 7
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "source": "aws_vpc.practice",
+      "target": "aws_instance.app",
+      "label": "Sample network membership"
+    },
+    {
+      "source": "aws_security_group.admin",
+      "target": "aws_instance.app",
+      "label": "Sample security group attachment"
+    }
+  ]
+}

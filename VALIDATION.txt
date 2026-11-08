@@ -1,0 +1,25 @@
+S4BLE 3.5.0 — verification performed November 8, 2026
+
+Automated validation:
+- 72 tests passed; 0 failed.
+- JavaScript syntax checks passed for server, analyzer, browser feature/product code and diagram routing.
+- npm audit --omit=dev: 0 known vulnerabilities after updating body-parser and qs in the lockfile.
+
+Browser verification on the local server:
+- Loaded example workspace from Cloud Guide.
+- Selected and analyzed local JSON file; selection alone did not submit source.
+- Pasted and analyzed Terraform with VPC/subnet/instance dependency references.
+- Submitted invalid JSON and verified clear error plus recovery.
+- Refreshed a saved workspace from the previous engine version explicitly.
+- Verified category overview, detail/context views, arrows, Fit view, full screen and both themes.
+- Verified resource search and a no-change PR review.
+- Downloaded a Markdown report successfully.
+- Checked narrow mobile dashboard layout (no document horizontal overflow).
+- Browser console showed no errors/warnings during the checked diagram flows.
+
+Verification limits:
+- No production deployment or DNS changes were made.
+- Vercel-specific payload/header behavior is configured and documented; hosted end-to-end deployment was not exercised.
+- Automated routing tests cover dense, backward, vertical, mixed-confidence and zoom cases; not every possible input topology can be guaranteed.
+- No sustained production load test, independent security audit, or all-browser/device certification was performed.
+- The browser workspace is local to each device; no login, shared accounts or cloud persistence is provided.

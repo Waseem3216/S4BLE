@@ -1,5 +1,7 @@
 # S4BLE Analysis Accuracy Contract
 
+Version 3.4 includes the corrections and tested boundaries listed in [UPDATE_NOTES_3.4.md](UPDATE_NOTES_3.4.md). The earlier 3.3 changes below remain historical context.
+
 ## What this build is designed to do
 
 S4BLE is a static, evidence-based infrastructure review tool. It parses supported Terraform, CloudFormation, Kubernetes, YAML, JSON, and normalized snapshot inputs; builds only relationships supported by resource-specific evidence; and emits findings only when the imported artifact contains enough information to support the statement.

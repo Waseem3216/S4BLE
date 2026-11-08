@@ -23,6 +23,8 @@ const APP_ROUTES = Object.freeze({
     heading: 'Terraform PR Risk Reviewer',
     title: 'Terraform PR Risk Reviewer | S4BLE'
   },
+  inventory: { path: '/resource-explorer', eyebrow: 'Understand Your Environment', heading: 'Resource Explorer', title: 'Resource Explorer | S4BLE' },
+  learn: { path: '/cloud-guide', eyebrow: 'Learn with Your Infrastructure', heading: 'Cloud Guide', title: 'Cloud Guide | S4BLE' },
   importer: {
     path: '/import-infrastructure',
     eyebrow: 'Workspace Import',
@@ -55,17 +57,24 @@ let currentPreview = null;
 let pendingImportFiles = [];
 let pendingReviewFiles = [];
 let previewSequence = 0;
+let importSequence = 0;
+let reviewSequence = 0;
+let serviceRequestLimit = 8 * 1024 * 1024;
+let importBusy = false;
+let reviewBusy = false;
+const fileReadSequence = { import: 0, review: 0 };
 let prReview = { findings: [], diffs: [], riskScore: null, decision: 'Waiting for input', counts: { add: 0, change: 0, delete: 0 }, analysis: null };
 let selectedArchitectureCategory = null;
 let architectureGraphMode = 'internal';
+let architectureConnectionMode = 'trace';
 let selectedExplorerResourceId = null;
-let architectureZoom = clampNumber(Number(localStorage.getItem(ZOOM_KEY)) || 1, ZOOM_MIN, ZOOM_MAX);
-let activeTheme = localStorage.getItem(THEME_KEY) || 'light';
+let architectureZoom = clampNumber(Number(readLocalValue(ZOOM_KEY)) || 1, ZOOM_MIN, ZOOM_MAX);
+let activeTheme = readLocalValue(THEME_KEY) || 'light';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => Array.from(document.querySelectorAll(selector));
 
-const SABLE_LOADER_MIN_MS = 2200;
+const SABLE_LOADER_MIN_MS = 180;
 let sableLoaderStart = 0;
 let sableLoaderFrame = null;
 
@@ -133,7 +142,8 @@ async function init() {
   applyArchitectureZoom();
   renderAll();
   try {
-    await hydrateSavedWorkspace();
+    if (workspace.resources.length && !currentAnalysis.resources.length) showToast('A saved workspace needs refreshing. Select Refresh analysis to update its findings.');
+    fetch('/api/health').then(response => response.json()).then(health => { if (Number.isFinite(health.limits?.requestBytes)) serviceRequestLimit = health.limits.requestBytes; }).catch(() => {});
   } finally {
     finishSableLoader();
   }
@@ -153,6 +163,12 @@ function bindNavigation() {
     button.addEventListener('click', openInfrastructureFilePicker);
   });
   $('#exportMarkdownBtn').addEventListener('click', exportWorkspaceReport);
+  $('#refreshWorkspaceBtn')?.addEventListener('click', async () => {
+    const button = $('#refreshWorkspaceBtn'); button.disabled = true; button.textContent = 'Refreshing…';
+    try { await hydrateSavedWorkspace(); } finally { button.disabled = false; button.textContent = 'Refresh analysis'; }
+  });
+  $('#clearWorkspaceBtn')?.addEventListener('click', clearWorkspaceData);
+  $('#tryExampleBtn')?.addEventListener('click', () => navigate('learn'));
   window.addEventListener('popstate', () => {
     const route = routeFromPath(window.location.pathname);
     navigate(route, { historyMode: 'none' });
@@ -183,7 +199,7 @@ function bindThemeControls() {
 function applyTheme(theme) {
   activeTheme = theme === 'light' ? 'light' : 'dark';
   document.body.dataset.theme = activeTheme;
-  localStorage.setItem(THEME_KEY, activeTheme);
+  writeLocalValue(THEME_KEY, activeTheme);
   $$('[data-theme-choice]').forEach(button => {
     button.classList.toggle('active', button.dataset.themeChoice === activeTheme);
     button.setAttribute('aria-pressed', String(button.dataset.themeChoice === activeTheme));
@@ -205,6 +221,21 @@ function getCssVar(name, fallback) {
 }
 
 function bindOverviewPage() {
+  const footer = $('#architectureExplorer .explorer-footer');
+  if (footer && !$('#relationshipPanelToggle')) {
+    const toggle = document.createElement('button');
+    toggle.id = 'relationshipPanelToggle';
+    toggle.type = 'button';
+    toggle.className = 'relationship-panel-toggle';
+    toggle.textContent = 'Show relationship evidence and selection details';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', () => {
+      const open = footer.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.textContent = open ? 'Hide relationship evidence and selection details' : 'Show relationship evidence and selection details';
+    });
+    footer.before(toggle);
+  }
   $('#findingSeverityFilter').addEventListener('change', renderFindings);
   $('#resourceSearch').addEventListener('input', renderResourceTable);
   $('#maximizeArchitectureBtn').addEventListener('click', event => {
@@ -248,11 +279,18 @@ function bindOverviewPage() {
   if (closeExplorerBtn) {
     closeExplorerBtn.addEventListener('click', event => {
       event.stopPropagation();
+      const category = selectedArchitectureCategory;
       selectedArchitectureCategory = null;
       selectedExplorerResourceId = null;
       renderArchitecture();
+      $$('.arch-category-node').find(node => node.dataset.category === category)?.focus({ preventScroll: true });
     });
   }
+
+  $('#connectionModeBtn')?.addEventListener('click', () => {
+    architectureConnectionMode = architectureConnectionMode === 'trace' ? 'all' : 'trace';
+    renderArchitectureExplorer();
+  });
 
   $$('.explorer-mode').forEach(button => {
     button.addEventListener('click', event => {
@@ -268,6 +306,15 @@ function bindOverviewPage() {
     renderArchitectureExplorer();
   });
   document.addEventListener('keydown', event => {
+    const panel = $('#architecturePanel');
+    // A details drawer or tool dialog owns keyboard focus above the map.
+    if ($('#ivModal:not(.hidden)') || $('#ivDetailsDrawer.open')) return;
+    if (event.key === 'Tab' && panel.classList.contains('maximized')) {
+      const controls = [...panel.querySelectorAll('button, input, select, a[href], [tabindex="0"]')].filter(element => !element.disabled && element.getClientRects().length);
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+    }
     if (event.key === 'Escape' && selectedArchitectureCategory) {
       selectedArchitectureCategory = null;
       selectedExplorerResourceId = null;
@@ -286,18 +333,19 @@ function fitExplorerView() {
   if (!viewport) return;
 
   const contentWidth = selectedArchitectureCategory
-    ? parseFloat(getComputedStyle(viewport).getPropertyValue('--explorer-stage-width')) || viewport.scrollWidth
+    ? Number(viewport.dataset.contentWidth) || viewport.scrollWidth
     : viewport.scrollWidth;
   const contentHeight = selectedArchitectureCategory
-    ? parseFloat(getComputedStyle(viewport).getPropertyValue('--explorer-stage-height')) || viewport.scrollHeight
+    ? Number(viewport.dataset.contentHeight) || viewport.scrollHeight
     : viewport.scrollHeight;
 
   if (!contentWidth || !contentHeight) return;
   const widthRatio = Math.max(0.01, (viewport.clientWidth - 36) / contentWidth);
   const heightRatio = Math.max(0.01, (viewport.clientHeight - 36) / contentHeight);
-  const targetZoom = clampNumber(architectureZoom * Math.min(widthRatio, heightRatio, 1), ZOOM_MIN, 1);
+  const targetZoom = clampNumber(architectureZoom * Math.min(widthRatio, heightRatio), ZOOM_MIN, 1);
   setArchitectureZoom(targetZoom);
-  requestAnimationFrame(() => centerDiagramViewport(viewport));
+  // Zoom updates its scroll anchor on the next two frames. Center after that.
+  requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => centerDiagramViewport(viewport))));
 }
 
 function handleArchitectureWheel(event) {
@@ -373,6 +421,7 @@ function bindImportPage() {
 
   chooseFilesButton?.addEventListener('click', openPicker);
   $('#clearImportBtn').addEventListener('click', () => {
+    invalidateImport();
     importInput.value = '';
     fileInput.value = '';
     pendingImportFiles = [];
@@ -385,16 +434,13 @@ function bindImportPage() {
   $('#analyzeImportBtn').addEventListener('click', () => analyzeImportInput(true));
   $('#downloadSnapshotBtn').addEventListener('click', downloadNormalizedSnapshot);
 
-  importInput.addEventListener('input', debounce(() => {
+  importInput.addEventListener('input', () => {
+    invalidateImport();
     pendingImportFiles = [];
-    updateImportFileSummary([], importInput.value.trim() ? 'Using pasted source.' : 'No files selected.');
-    syncPrimaryActions();
-    if (importInput.value.trim().length >= 20) previewImportInput();
-    else if (!importInput.value.trim()) {
-      currentPreview = null;
-      renderImportPreview();
-    }
-  }, 500));
+    currentPreview = null;
+    updateImportFileSummary([], importInput.value.trim() ? 'Using pasted source. Select Analyze workspace to process it.' : 'No files selected.');
+    renderImportPreview();
+  });
 
   dropzone.addEventListener('click', event => {
     if (event.target === fileInput) return;
@@ -434,6 +480,8 @@ function openInfrastructureFilePicker() {
 
 function bindReviewerPage() {
   $('#clearPrBtn').addEventListener('click', () => {
+    invalidateReview();
+    $('#prFileInput').value = '';
     $('#prInput').value = '';
     pendingReviewFiles = [];
     prReview = { findings: [], diffs: [], riskScore: null, decision: 'Waiting for input', counts: { add: 0, change: 0, delete: 0 }, analysis: null };
@@ -453,7 +501,7 @@ function bindReviewerPage() {
     showToast(`Baseline saved with ${currentAnalysis.resources.length} resources.`);
   });
   $('#exportPrReportBtn').addEventListener('click', exportPrReport);
-  $('#prInput').addEventListener('input', () => { pendingReviewFiles = []; syncPrimaryActions(); });
+  $('#prInput').addEventListener('input', () => { invalidateReview(); pendingReviewFiles = []; renderPrReview(); });
   $('#prFileInput').addEventListener('change', event => handleFilesSelect(event.target.files, $('#prInput'), reviewPrRisk, 'review'));
 }
 
@@ -474,6 +522,7 @@ function navigate(route, { historyMode = 'push' } = {}) {
   $('#routeEyebrow').textContent = config.eyebrow;
   $('#routeTitle').textContent = config.heading;
   document.title = config.title;
+  window.scrollTo({ top: 0, behavior: 'instant' });
 
   if (historyMode !== 'none') {
     const nextUrl = `${config.path}${window.location.search}${window.location.hash}`;
@@ -495,7 +544,7 @@ function navigate(route, { historyMode = 'push' } = {}) {
 function loadWorkspace() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return JSON.parse(saved);
+    if (saved) { const value = JSON.parse(saved); if (value && Array.isArray(value.resources) && value.resources.every(r => r && typeof r === 'object')) return value; }
   } catch (error) {
     console.warn('Could not load saved workspace', error);
   }
@@ -505,7 +554,7 @@ function loadWorkspace() {
 function loadAnalysis() {
   try {
     const saved = localStorage.getItem(ANALYSIS_KEY);
-    if (saved) return JSON.parse(saved);
+    if (saved) { const value = JSON.parse(saved); if (value && value.metadata?.engineVersion === '3.5.0' && Array.isArray(value.resources) && Array.isArray(value.findings) && Array.isArray(value.grouped) && value.counts && value.graph && value.metadata && value.resources.every(r => r && typeof r.id === 'string') && value.findings.every(f => f && typeof f.title === 'string' && ['critical', 'high', 'medium', 'low'].includes(f.severity))) return value; }
   } catch (error) {
     console.warn('Could not load saved analysis', error);
   }
@@ -513,38 +562,73 @@ function loadAnalysis() {
 }
 
 async function hydrateSavedWorkspace() {
-  if (!workspace?.resources?.length || currentAnalysis?.resources?.length) return;
+  if (!workspace?.resources?.length) return;
+  const sequence = ++importSequence;
   try {
     const result = await requestAnalysis(JSON.stringify({ workspace: workspace.workspace, resources: workspace.resources, relationships: workspace.explicitLinks || [] }), []);
+    if (sequence !== importSequence) return;
     saveWorkspace(result.workspace, result.analysis);
+    showToast('Saved workspace analysis refreshed.');
   } catch (error) {
-    console.warn('Could not rehydrate saved workspace analysis', error);
+    if (sequence !== importSequence) return;
+    showToast(error.message || 'Could not refresh the saved workspace.');
   }
 }
 
 function saveWorkspace(nextWorkspace, nextAnalysis, rerender = true) {
   workspace = nextWorkspace;
   currentAnalysis = nextAnalysis || emptyAnalysis();
-  writeLocalJson(STORAGE_KEY, workspace);
-  writeLocalJson(ANALYSIS_KEY, currentAnalysis);
+  selectedArchitectureCategory = null;
+  selectedExplorerResourceId = null;
+  const savedWorkspace = writeLocalJson(STORAGE_KEY, workspace);
+  const savedAnalysis = writeLocalJson(ANALYSIS_KEY, currentAnalysis);
+  if (!savedWorkspace || !savedAnalysis) showToast('Analysis is ready, but this browser could not save it. Export a report before closing.');
   if (rerender) renderAll();
   else syncPrimaryActions();
 }
 
 async function requestAnalysis(text, files = [], endpoint = '/api/analyze') {
-  let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
-    response = await fetch(endpoint, {
-      method: 'POST',
+    const body = JSON.stringify({ text: files.length ? '' : String(text || ''), files, explicitType: 'auto', includeInferred: true, baseline: endpoint === '/api/review' ? readLocalJson(BASELINE_KEY) || workspace : undefined });
+    if (new Blob([body]).size > serviceRequestLimit) throw new Error('This import exceeds the hosting request limit, including the saved baseline and JSON formatting. Try a smaller workspace.');
+    const response = await fetch(endpoint, {
+      method: 'POST', signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: String(text || ''), files, explicitType: 'auto', includeInferred: true, baseline: endpoint === '/api/review' ? readLocalJson(BASELINE_KEY) || workspace : undefined })
+      body
     });
+    if (response.status === 413) throw new Error('This import is too large for the hosting service. Try fewer files or a smaller workspace.');
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Analysis could not complete (HTTP ${response.status}). Please try again.`);
+    if (!payload.workspace || !Array.isArray(payload.analysis?.resources)) throw new Error('The analysis service returned an incomplete result. Please try again.');
+    return payload;
   } catch (error) {
-    throw new Error('Sable analysis service is unavailable. Start the production app with "npm install" and "npm start", then open http://localhost:8080.');
-  }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Analysis service returned HTTP ${response.status}.`);
-  return payload;
+    if (error.name === 'AbortError') throw new Error('Analysis took too long. Try a smaller import or retry in a moment.');
+    if (error instanceof TypeError) throw new Error('Cannot reach the analysis service. Check your connection and try again.');
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+
+function invalidateImport() {
+  previewSequence++; importSequence++; fileReadSequence.import++; importBusy = false;
+  $('#importStatus').textContent = '';
+  syncPrimaryActions();
+}
+
+function invalidateReview() {
+  reviewSequence++; fileReadSequence.review++; reviewBusy = false;
+  prReview = { findings: [], diffs: [], riskScore: null, decision: 'Waiting for input', counts: { add: 0, change: 0, delete: 0 }, analysis: null };
+  $('#reviewStatus').textContent = '';
+  syncPrimaryActions();
+}
+
+function clearWorkspaceData() {
+  if (!window.confirm('Clear the saved workspace, baseline, notes, policies, and review progress from this browser? Export anything you want to keep first.')) return;
+  try {
+    Object.keys(localStorage).filter(key => key.startsWith('sable.') && key !== THEME_KEY).forEach(key => localStorage.removeItem(key));
+  } catch { showToast('Browser storage could not be cleared. Use your browser’s site-data settings.'); return; }
+  window.location.reload();
 }
 
 function emptyAnalysis() {
@@ -600,7 +684,7 @@ function setArchitectureZoom(value, anchor = null) {
   const scrollTop = viewport?.scrollTop || 0;
 
   architectureZoom = nextZoom;
-  localStorage.setItem(ZOOM_KEY, String(architectureZoom));
+  writeLocalValue(ZOOM_KEY, String(architectureZoom));
   applyArchitectureZoom();
   requestAnimationFrame(() => {
     drawArchitectureConnections();
@@ -631,6 +715,7 @@ function renderAll() {
   renderImportPreview();
   renderPrReview();
   window.SableFeatures?.renderAll?.();
+  window.SableProduct?.renderAll?.();
 }
 
 function renderSidebar() {
@@ -650,6 +735,7 @@ function renderWorkspaceBanner() {
   $('#workspaceSourceType').textContent = count ? humanizeToken(workspace.sourceType || 'workspace') : '—';
   $('#workspaceAnalysisMode').textContent = count ? humanizeToken(currentAnalysis.metadata?.analysisMode || workspace.analysisMode || 'analysis') : '—';
   $('#workspaceResourceCount').textContent = String(count);
+  $('#refreshWorkspaceBtn').hidden = !(count && !currentAnalysis.resources.length);
 }
 
 function summarizeWorkspaceTitle(workspaceData = {}) {
@@ -752,7 +838,9 @@ function renderArchitecture() {
     .filter(group => group.resources.length || group.findings.length)
     .forEach(group => {
       const topResources = group.resources.slice(0, 3).map(resource => resource.name).join(', ');
-      const node = document.createElement('article');
+      const node = document.createElement('button');
+      node.type = 'button';
+      node.setAttribute('aria-label', `Open ${group.label || group.category}: ${group.resources.length} resources and ${group.findings.length} findings`);
       node.className = `arch-node arch-category-node arch-pos-${group.category}`;
       node.dataset.category = group.category;
       node.innerHTML = `
@@ -768,7 +856,7 @@ function renderArchitecture() {
         </div>
         <div class="category-preview">
           <span>${topResources ? escapeHtml(topResources) : 'No resources detected'}</span>
-          <strong>Open resource map →</strong>
+          <strong>Explore resources <span aria-hidden="true">↗</span></strong>
         </div>
       `;
       node.addEventListener('click', () => {
@@ -776,6 +864,7 @@ function renderArchitecture() {
         architectureGraphMode = 'internal';
         selectedExplorerResourceId = null;
         renderArchitecture();
+        $('#explorerStage')?.focus({ preventScroll: true });
       });
       grid.appendChild(node);
     });
@@ -800,6 +889,9 @@ function drawArchitectureConnections() {
   const panel = $('#architectureCanvas');
   const nodes = $$('.arch-node');
   svg.innerHTML = '';
+  // Remove the previous SVG extent before measuring a zoomed-out board.
+  svg.style.width = '0px';
+  svg.style.height = '0px';
   if (nodes.length < 2) return;
 
   const panelRect = panel.getBoundingClientRect();
@@ -816,30 +908,68 @@ function drawArchitectureConnections() {
     nodeRects.set(node.dataset.category, rectToCanvasRect(rect, panelRect, panel.scrollLeft, panel.scrollTop));
   });
 
-  const pairs = getCategoryRelationshipPairs(currentAnalysis.resources).slice(0, 9);
+  const groupedPairs = new Map();
+  getCategoryRelationshipPairs(currentAnalysis.resources).forEach(pair => {
+    const key = [pair.source, pair.target].sort().join('|') + ':' + pair.inferred;
+    const existing = groupedPairs.get(key);
+    if (existing) { existing.bidirectional = true; existing.count += pair.count; }
+    else groupedPairs.set(key, { ...pair });
+  });
+  const pairs = [...groupedPairs.values()];
   const endpoints = allocateConnectionPorts(pairs, nodeRects, item => item.source, item => item.target);
   const obstacles = Array.from(nodeRects.entries()).map(([key, rect]) => ({ key, ...rect }));
 
+  const occupied = [];
   pairs.forEach((pair, index) => {
     const endpoint = endpoints[index];
     if (!endpoint) return;
-    const points = routeOrthogonalConnection(
-      endpoint.from,
-      endpoint.to,
-      obstacles.filter(item => item.key !== pair.source && item.key !== pair.target),
-      width,
-      height,
-      index
-    );
+    const points = SableRouting.route(endpoint.from, endpoint.to, obstacles, width, height, index, occupied);
+    if (!points) return;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', roundedOrthogonalPath(points, 12));
     path.setAttribute('class', `connection-line category-connection-line ${pair.inferred ? 'inferred' : 'confirmed'}`);
     path.setAttribute('marker-end', 'url(#categoryArrow)');
+    if (pair.bidirectional) path.setAttribute('marker-start', 'url(#categoryArrow)');
     const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-    title.textContent = `${CATEGORY_META[pair.source]?.label || pair.source} → ${CATEGORY_META[pair.target]?.label || pair.target}`;
+    title.textContent = `${CATEGORY_META[pair.source]?.label || pair.source} ${pair.bidirectional ? '↔' : '→'} ${CATEGORY_META[pair.target]?.label || pair.target} · ${pair.count} ${pair.inferred ? 'inferred' : 'confirmed'} relationships`;
     path.appendChild(title);
+    appendConnectionHalo(svg, path);
     svg.appendChild(path);
+    if (pair.count > 1) appendConnectionCount(svg, points, pair.count);
   });
+}
+
+function appendConnectionHalo(svg, path) {
+  const halo = path.cloneNode(false);
+  halo.removeAttribute('marker-end');
+  halo.removeAttribute('marker-start');
+  halo.removeAttribute('data-source');
+  halo.removeAttribute('data-target');
+  halo.setAttribute('class', 'connection-halo');
+  svg.appendChild(halo);
+}
+
+function appendConnectionCount(svg, points, count) {
+  const segments = points.slice(1).map((end, i) => ({ start: points[i], end, length: Math.abs(end.x - points[i].x) + Math.abs(end.y - points[i].y) }));
+  const segment = segments.sort((a, b) => b.length - a.length)[0];
+  if (!segment || segment.length < 90) return;
+  const x = (segment.start.x + segment.end.x) / 2;
+  const y = (segment.start.y + segment.end.y) / 2;
+  const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  group.setAttribute('class', 'connection-count');
+  const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  const width = String(count).length * 7 + 18;
+  pill.setAttribute('x', String(x - width / 2));
+  pill.setAttribute('y', String(y - 10));
+  pill.setAttribute('width', String(width));
+  pill.setAttribute('height', '20');
+  pill.setAttribute('rx', '10');
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.setAttribute('x', String(x));
+  label.setAttribute('y', String(y));
+  label.textContent = String(count);
+  group.append(pill, label);
+  svg.appendChild(group);
 }
 
 function rectToCanvasRect(rect, containerRect, scrollLeft = 0, scrollTop = 0) {
@@ -885,7 +1015,7 @@ function allocateConnectionPorts(items, rects, getSource, getTarget) {
   const buckets = new Map();
   endpointMeta.filter(Boolean).forEach(meta => {
     [['source', meta.source, meta.sourceSide, meta.targetRect], ['target', meta.target, meta.targetSide, meta.sourceRect]].forEach(([role, key, side, other]) => {
-      const bucketKey = `${key}:${side}:${role}`;
+      const bucketKey = `${key}:${side}`;
       if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
       buckets.get(bucketKey).push({ meta, role, other });
     });
@@ -926,71 +1056,6 @@ function pointOnRectSide(rect, side, slotIndex = 0, slotTotal = 1, gap = 0) {
     y: side === 'bottom' ? rect.bottom + gap : rect.top - gap,
     side
   };
-}
-
-function routeOrthogonalConnection(from, to, obstacles, width, height, index = 0) {
-  const gutter = 26;
-  const channelOffset = ((index % 5) - 2) * 7;
-  const midX = (from.x + to.x) / 2 + channelOffset;
-  const midY = (from.y + to.y) / 2 + channelOffset;
-  const outerTop = Math.max(18, Math.min(from.y, to.y) - 46 - (index % 3) * 12);
-  const outerBottom = Math.min(height - 18, Math.max(from.y, to.y) + 46 + (index % 3) * 12);
-  const outerLeft = Math.max(18, Math.min(from.x, to.x) - 54 - (index % 3) * 12);
-  const outerRight = Math.min(width - 18, Math.max(from.x, to.x) + 54 + (index % 3) * 12);
-
-  const candidates = [
-    [from, { x: midX, y: from.y }, { x: midX, y: to.y }, to],
-    [from, { x: from.x, y: midY }, { x: to.x, y: midY }, to],
-    [from, { x: from.x, y: outerTop }, { x: to.x, y: outerTop }, to],
-    [from, { x: from.x, y: outerBottom }, { x: to.x, y: outerBottom }, to],
-    [from, { x: outerLeft, y: from.y }, { x: outerLeft, y: to.y }, to],
-    [from, { x: outerRight, y: from.y }, { x: outerRight, y: to.y }, to]
-  ].map(cleanOrthogonalPoints);
-
-  let best = candidates[0];
-  let bestScore = Number.POSITIVE_INFINITY;
-  candidates.forEach(points => {
-    const score = scoreOrthogonalRoute(points, obstacles, gutter);
-    if (score < bestScore) {
-      best = points;
-      bestScore = score;
-    }
-  });
-  return best;
-}
-
-function scoreOrthogonalRoute(points, obstacles, padding = 20) {
-  let length = 0;
-  let intersections = 0;
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const a = points[i];
-    const b = points[i + 1];
-    length += Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-    obstacles.forEach(rect => {
-      if (segmentHitsRect(a, b, rect, padding)) intersections += 1;
-    });
-  }
-  return length + intersections * 20000 + Math.max(0, points.length - 2) * 14;
-}
-
-function segmentHitsRect(a, b, rect, padding = 12) {
-  const left = rect.left - padding;
-  const right = rect.right + padding;
-  const top = rect.top - padding;
-  const bottom = rect.bottom + padding;
-  if (Math.abs(a.x - b.x) < 0.5) {
-    const x = a.x;
-    const minY = Math.min(a.y, b.y);
-    const maxY = Math.max(a.y, b.y);
-    return x > left && x < right && maxY > top && minY < bottom;
-  }
-  if (Math.abs(a.y - b.y) < 0.5) {
-    const y = a.y;
-    const minX = Math.min(a.x, b.x);
-    const maxX = Math.max(a.x, b.x);
-    return y > top && y < bottom && maxX > left && minX < right;
-  }
-  return false;
 }
 
 function cleanOrthogonalPoints(points) {
@@ -1076,6 +1141,7 @@ function renderArchitectureExplorer() {
 
   $$('.explorer-mode').forEach(button => {
     button.classList.toggle('active', button.dataset.graphMode === architectureGraphMode);
+    button.setAttribute('aria-pressed', String(button.dataset.graphMode === architectureGraphMode));
   });
 
   const layout = renderExplorerNodes(visibleResources, selectedKeys);
@@ -1136,12 +1202,13 @@ function renderExplorerNodes(resources, selectedKeys) {
   const layer = $('#explorerNodeLayer');
   const stage = $('#explorerStage');
   const categories = getVisibleCategories(resources);
-  const nodeWidth = Math.round(Math.max(184, Math.min(300, 238 * architectureZoom)));
-  const nodeHeight = Math.round(Math.max(90, Math.min(138, 108 * architectureZoom)));
-  const horizontalGap = Math.round(Math.max(54, 74 * architectureZoom));
-  const rowGap = Math.round(Math.max(124, 158 * architectureZoom));
-  const lanePad = Math.round(Math.max(36, 52 * architectureZoom));
-  const topPad = Math.round(Math.max(80, 96 * architectureZoom));
+  const nodeWidth = 252 * architectureZoom;
+  const nodeHeight = 116 * architectureZoom;
+  const horizontalGap = 88 * architectureZoom;
+  const rowGap = 196 * architectureZoom;
+  const lanePad = 64 * architectureZoom;
+  // Lane headings stay readable while the resource map scales beneath them.
+  const topPad = 64 + 30 * architectureZoom;
   const maxRowsPerColumn = 6;
   const positions = new Map();
   const grouped = new Map(categories.map(category => [category, []]));
@@ -1163,8 +1230,11 @@ function renderExplorerNodes(resources, selectedKeys) {
     maxVisibleRows = Math.max(maxVisibleRows, rows);
   });
 
+  const contentHeight = topPad + (maxVisibleRows - 1) * rowGap + nodeHeight + 64 * architectureZoom;
+  stage.dataset.contentWidth = String(cursorX);
+  stage.dataset.contentHeight = String(contentHeight);
   const stageWidth = Math.max(stage.clientWidth || 1080, cursorX);
-  const stageHeight = Math.max(stage.clientHeight || 560, topPad + (maxVisibleRows - 1) * rowGap + nodeHeight + Math.round(110 * architectureZoom));
+  const stageHeight = Math.max(stage.clientHeight || 560, contentHeight);
 
   layer.innerHTML = '';
   layer.style.width = `${stageWidth}px`;
@@ -1185,6 +1255,8 @@ function renderExplorerNodes(resources, selectedKeys) {
       node.type = 'button';
       node.className = `resource-map-node ${risk.maxSeverity || 'clean'} ${selectedKeys.has(key) ? 'focus-category' : 'context-resource'} ${selectedExplorerResourceId === key ? 'selected' : ''}`;
       node.dataset.resourceKey = key;
+      node.setAttribute('aria-pressed', String(selectedExplorerResourceId === key));
+      node.setAttribute('aria-label', `${resource.name}, ${resource.type}, ${risk.total} findings. Inspect resource.`);
       node.style.left = `${x}px`;
       node.style.top = `${y}px`;
       node.style.width = `${nodeWidth}px`;
@@ -1199,6 +1271,7 @@ function renderExplorerNodes(resources, selectedKeys) {
         event.stopPropagation();
         selectedExplorerResourceId = key;
         renderArchitectureExplorer();
+        $$('.resource-map-node').find(item => item.dataset.resourceKey === key)?.focus({ preventScroll: true });
         window.SableFeatures?.onResourceSelected?.(key);
       });
       layer.appendChild(node);
@@ -1225,15 +1298,30 @@ function renderExplorerConnections(links, positions, width, height) {
   ensureArrowMarker(svg, 'explorerArrow', getCssVar('--wire-muted', 'rgba(65,70,82,.55)'), 8);
   ensureArrowMarker(svg, 'explorerFocusArrow', getCssVar('--wire', 'rgba(54,87,255,.88)'), 9);
 
-  const routeItems = links
+  const featureFocus = window.SableFeatures?.focusResourceIds?.();
+  const trace = architectureConnectionMode === 'trace';
+  const displayedLinks = links.filter(link => {
+    if (featureFocus?.size) return featureFocus.has(link.source) && featureFocus.has(link.target);
+    if (!trace) return true;
+    if (selectedExplorerResourceId) return link.source === selectedExplorerResourceId || link.target === selectedExplorerResourceId;
+    return links.length <= 24;
+  });
+  const modeButton = $('#connectionModeBtn');
+  modeButton.textContent = trace ? 'Show all connections' : 'Trace selected resource';
+  modeButton.setAttribute('aria-pressed', String(!trace));
+  const status = $('#connectionStatus');
+  status.textContent = `${displayedLinks.length} of ${links.length} connections shown. ` +
+    (trace && !selectedExplorerResourceId && links.length > 24 ? 'Select a resource to trace its direct links, or choose Show all connections. ' : '') +
+    'Arrows follow imported dependencies; they do not represent live traffic.';
+  const routeItems = displayedLinks
     .map((link, index) => ({ link, index, from: positions.get(link.source), to: positions.get(link.target) }))
     .filter(item => item.from && item.to && item.link.source !== item.link.target);
 
   const portBuckets = new Map();
   routeItems.forEach(item => {
-    const sameLane = item.from.laneIndex === item.to.laneIndex;
-    item.sourceSide = sameLane ? 'right' : (item.to.laneIndex > item.from.laneIndex ? 'right' : 'left');
-    item.targetSide = sameLane ? 'right' : (item.to.laneIndex > item.from.laneIndex ? 'left' : 'right');
+    const sameColumn = Math.abs(item.from.cx - item.to.cx) < 1;
+    item.sourceSide = sameColumn || item.to.cx > item.from.cx ? 'right' : 'left';
+    item.targetSide = sameColumn || item.to.cx < item.from.cx ? 'right' : 'left';
     addPortBucket(portBuckets, item, 'source', item.link.source, item.sourceSide, item.to.cy);
     addPortBucket(portBuckets, item, 'target', item.link.target, item.targetSide, item.from.cy);
   });
@@ -1241,13 +1329,13 @@ function renderExplorerConnections(links, positions, width, height) {
 
   const obstacles = Array.from(positions.entries()).map(([key, rect]) => ({ key, ...rect }));
 
+  const occupied = [];
+  let unrouted = 0;
   routeItems.forEach(item => {
     const fromPoint = explorerPortPoint(item.from, item.sourceSide, item.sourceSlot, item.sourceTotal, 3);
     const toPoint = explorerPortPoint(item.to, item.targetSide, item.targetSlot, item.targetTotal, 2);
-    const otherObstacles = obstacles.filter(obstacle => obstacle.key !== item.link.source && obstacle.key !== item.link.target);
-    const points = item.from.laneIndex === item.to.laneIndex
-      ? routeSameLaneConnection(item, fromPoint, toPoint, width)
-      : routeCrossLaneConnection(item, fromPoint, toPoint, otherObstacles, width, height);
+    const points = SableRouting.route(fromPoint, toPoint, obstacles, width, height, item.index, occupied);
+    if (!points) { unrouted++; return; }
 
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     const focused = selectedExplorerResourceId && (item.link.source === selectedExplorerResourceId || item.link.target === selectedExplorerResourceId);
@@ -1262,12 +1350,14 @@ function renderExplorerConnections(links, positions, width, height) {
     const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
     title.textContent = `${item.link.source} → ${item.link.target} (${item.link.confidence || 'confirmed'}: ${item.link.label || 'dependency'})`;
     path.appendChild(title);
+    appendConnectionHalo(svg, path);
     svg.appendChild(path);
   });
+  if (unrouted) status.textContent = `${displayedLinks.length - unrouted} of ${links.length} connections drawn. ${unrouted} overlapping routes omitted; relationship evidence remains available. ` + status.textContent.split('. ').slice(1).join('. ');
 }
 
 function addPortBucket(buckets, item, role, key, side, sortValue) {
-  const bucketKey = `${key}:${side}:${role}`;
+  const bucketKey = `${key}:${side}`;
   if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
   buckets.get(bucketKey).push({ item, role, sortValue });
 }
@@ -1284,7 +1374,8 @@ function allocatePortBuckets(buckets) {
 
 function explorerPortPoint(node, side, slot = 0, total = 1, gap = 0) {
   const fraction = (slot + 1) / (total + 1);
-  const y = node.top + Math.max(18, Math.min(node.height - 18, node.height * fraction));
+  const padding = Math.min(18, node.height * 0.18);
+  const y = node.top + Math.max(padding, Math.min(node.height - padding, node.height * fraction));
   return {
     x: side === 'right' ? node.right + gap : node.left - gap,
     y,
@@ -1292,71 +1383,40 @@ function explorerPortPoint(node, side, slot = 0, total = 1, gap = 0) {
   };
 }
 
-function routeSameLaneConnection(item, from, to, width) {
-  const useRight = item.from.laneRight - item.from.right >= item.from.left - item.from.laneLeft;
-  const railStep = 12 + (item.index % 4) * 10;
-  const railX = useRight
-    ? Math.min(width - 16, item.from.laneRight - railStep)
-    : Math.max(16, item.from.laneLeft + railStep);
-  const start = useRight ? from : explorerPortPoint(item.from, 'left', item.sourceSlot, item.sourceTotal, 3);
-  const end = useRight ? to : explorerPortPoint(item.to, 'left', item.targetSlot, item.targetTotal, 2);
-  return cleanOrthogonalPoints([
-    start,
-    { x: railX, y: start.y },
-    { x: railX, y: end.y },
-    end
-  ]);
-}
-
-function routeCrossLaneConnection(item, from, to, obstacles, width, height) {
-  const direction = item.to.laneIndex > item.from.laneIndex ? 1 : -1;
-  const sourceBoundary = direction > 0 ? item.from.laneRight : item.from.laneLeft;
-  const targetBoundary = direction > 0 ? item.to.laneLeft : item.to.laneRight;
-  const centerRail = (sourceBoundary + targetBoundary) / 2;
-  const parallelOffset = ((item.index % 7) - 3) * 7;
-  const railX = Math.max(20, Math.min(width - 20, centerRail + parallelOffset));
-  const topRail = Math.max(22, Math.min(from.y, to.y) - 54 - (item.index % 4) * 10);
-  const bottomRail = Math.min(height - 22, Math.max(from.y, to.y) + 54 + (item.index % 4) * 10);
-  const sourceGutterX = direction > 0 ? item.from.laneRight - 24 : item.from.laneLeft + 24;
-  const targetGutterX = direction > 0 ? item.to.laneLeft + 24 : item.to.laneRight - 24;
-
-  const candidates = [
-    cleanOrthogonalPoints([from, { x: railX, y: from.y }, { x: railX, y: to.y }, to]),
-    cleanOrthogonalPoints([from, { x: sourceGutterX, y: from.y }, { x: sourceGutterX, y: topRail }, { x: targetGutterX, y: topRail }, { x: targetGutterX, y: to.y }, to]),
-    cleanOrthogonalPoints([from, { x: sourceGutterX, y: from.y }, { x: sourceGutterX, y: bottomRail }, { x: targetGutterX, y: bottomRail }, { x: targetGutterX, y: to.y }, to])
-  ];
-
-  let best = candidates[0];
-  let bestScore = Number.POSITIVE_INFINITY;
-  candidates.forEach(points => {
-    const score = scoreOrthogonalRoute(points, obstacles, 14);
-    if (score < bestScore) {
-      best = points;
-      bestScore = score;
-    }
-  });
-  return best;
-}
-
 function renderRelationshipList(links, resourceMap) {
   const container = $('#relationshipList');
-  if (!links.length) {
-    container.innerHTML = '<div class="relationship-empty">No confirmed dependency lines were found in the imported evidence for this view. Switch to cloud context to optionally include clearly labeled inferred relationships.</div>';
+  const visible = selectedExplorerResourceId
+    ? links.filter(link => link.source === selectedExplorerResourceId || link.target === selectedExplorerResourceId)
+    : links;
+  if (!visible.length) {
+    container.innerHTML = '<div class="relationship-empty">No relationships found in the imported evidence for this selection. Cloud context can include clearly labeled inferred relationships.</div>';
     return;
   }
-  container.innerHTML = links.slice(0, 12).map(link => {
-    const source = resourceMap.get(link.source);
-    const target = resourceMap.get(link.target);
-    return `
-      <div class="relationship-row" data-source="${escapeHtml(link.source)}" data-target="${escapeHtml(link.target)}" data-label="${escapeHtml(link.label || 'dependency')}" data-confidence="${escapeHtml(link.confidence || 'confirmed')}">
-        <span>${escapeHtml(source?.name || link.source)}</span>
-        <strong>→</strong>
-        <span>${escapeHtml(target?.name || link.target)}</span>
-        <small>${escapeHtml(link.label || 'dependency')} · ${escapeHtml(link.confidence || 'confirmed')}</small>
-        <button class="relationship-evidence-button" type="button">Evidence</button>
-      </div>
-    `;
-  }).join('');
+  let limit = 12;
+  const draw = () => {
+    container.innerHTML = `<p class="relationship-summary">${selectedExplorerResourceId ? 'Selected resource · ' : ''}${visible.length} relationship${visible.length === 1 ? '' : 's'}</p>` + visible.slice(0, limit).map(link => {
+      const source = resourceMap.get(link.source);
+      const target = resourceMap.get(link.target);
+      return `
+        <div class="relationship-row" data-source="${escapeHtml(link.source)}" data-target="${escapeHtml(link.target)}" data-label="${escapeHtml(link.label || 'dependency')}" data-confidence="${escapeHtml(link.confidence || 'confirmed')}">
+          <span title="${escapeHtml(source?.name || link.source)}">${escapeHtml(source?.name || link.source)}</span>
+          <strong aria-hidden="true">→</strong>
+          <span title="${escapeHtml(target?.name || link.target)}">${escapeHtml(target?.name || link.target)}</span>
+          <small>${escapeHtml(link.label || 'dependency')} · ${escapeHtml(link.confidence || 'confirmed')}</small>
+          <button class="relationship-evidence-button" type="button" aria-label="Evidence for ${escapeHtml(source?.name || link.source)} to ${escapeHtml(target?.name || link.target)}">Evidence</button>
+        </div>
+      `;
+    }).join('');
+    if (visible.length > limit) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'secondary-button relationship-more';
+      more.textContent = `Show more relationships (${visible.length - limit} remaining)`;
+      more.addEventListener('click', () => { limit += 24; draw(); });
+      container.appendChild(more);
+    }
+  };
+  draw();
 }
 
 function renderResourceInspector(resourceMap) {
@@ -1404,7 +1464,7 @@ function getCategoryRelationshipPairs(resources) {
     const source = graph.resourceMap.get(link.source);
     const target = graph.resourceMap.get(link.target);
     if (!source || !target || source.category === target.category) return;
-    const key = `${source.category}=>${target.category}`;
+    const key = `${source.category}=>${target.category}:${link.confidence === 'inferred' ? 'inferred' : 'confirmed'}`;
     if (!pairs.has(key)) pairs.set(key, { source: source.category, target: target.category, count: 0, inferred: true });
     const pair = pairs.get(key);
     pair.count += 1;
@@ -1445,7 +1505,7 @@ function ensureArrowMarker(svg, id, color, size = 8) {
   marker.setAttribute('markerWidth', String(size));
   marker.setAttribute('markerHeight', String(size));
   marker.setAttribute('markerUnits', 'userSpaceOnUse');
-  marker.setAttribute('orient', 'auto');
+  marker.setAttribute('orient', 'auto-start-reverse');
   const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   arrow.setAttribute('d', 'M 1 1 L 9 5 L 1 9 Z');
   arrow.setAttribute('fill', color);
@@ -1453,10 +1513,23 @@ function ensureArrowMarker(svg, id, color, size = 8) {
   defs.appendChild(marker);
 }
 
+let architectureReturnFocus = null;
 function toggleArchitectureMaximized(force) {
   const panel = $('#architecturePanel');
   const shouldMaximize = typeof force === 'boolean' ? force : !panel.classList.contains('maximized');
+  if (shouldMaximize && !panel.classList.contains('maximized')) architectureReturnFocus = document.activeElement;
   panel.classList.toggle('maximized', shouldMaximize);
+  if (shouldMaximize) {
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', 'Resource topology');
+    $('#maximizeArchitectureBtn')?.focus({ preventScroll: true });
+  } else {
+    panel.removeAttribute('role');
+    panel.removeAttribute('aria-modal');
+    panel.removeAttribute('aria-label');
+    architectureReturnFocus?.focus?.({ preventScroll: true });
+  }
   document.body.classList.toggle('architecture-modal-open', shouldMaximize);
   $('#maximizeArchitectureBtn').textContent = shouldMaximize ? '×' : '⛶';
   $('#maximizeArchitectureBtn').setAttribute('aria-label', shouldMaximize ? 'Minimize architecture view' : 'Maximize architecture view');
@@ -1578,28 +1651,41 @@ async function previewImportInput() {
 }
 
 async function analyzeImportInput(navigateToOverview = false) {
+  if (importBusy) return;
   const text = $('#importInput').value;
+  const sequence = ++importSequence;
+  previewSequence++;
+  importBusy = true;
+  currentPreview = null;
+  $('#importStatus').textContent = 'Analyzing your infrastructure…';
+  syncPrimaryActions();
   try {
     const result = await requestAnalysis(text, pendingImportFiles);
+    if (sequence !== importSequence) return;
     saveWorkspace(result.workspace, result.analysis);
     currentPreview = result;
     renderImportPreview();
-    const mode = result.analysis?.metadata?.analysisMode || result.workspace?.analysisMode || 'analysis';
-    showToast(`Analyzed ${result.analysis.resources.length} resources (${mode}).`);
+    $('#importStatus').textContent = `Analysis complete: ${result.analysis.resources.length} resources.`;
+    showToast(`Analyzed ${result.analysis.resources.length} resources.`);
     if (navigateToOverview) navigate('overview');
   } catch (error) {
+    if (sequence !== importSequence) return;
+    currentPreview = { error: error.message };
+    renderImportPreview();
+    $('#importStatus').textContent = error.message;
     showToast(error.message);
-  }
+  } finally { if (sequence === importSequence) { importBusy = false; syncPrimaryActions(); } }
 }
 
 function renderImportPreview() {
   const preview = currentPreview;
   if (!preview) {
-    $('#detectedType').textContent = 'No input';
+    const ready = Boolean($('#importInput').value.trim() || pendingImportFiles.length);
+    $('#detectedType').textContent = ready ? 'Ready to analyze' : 'No input';
     $('#previewResourceCount').textContent = '0';
     $('#previewFindingCount').textContent = '0';
     $('#previewCategoryCount').textContent = '0';
-    $('#jsonPreview').textContent = 'No parsed output yet.';
+    $('#jsonPreview').textContent = ready ? 'Select Analyze workspace to process the selected input.' : 'No parsed output yet.';
     updateAccuracyNote(null);
     syncPrimaryActions();
     return;
@@ -1667,29 +1753,39 @@ function updateAccuracyNote(analysis) {
 }
 
 async function reviewPrRisk() {
+  if (reviewBusy) return;
   const text = $('#prInput').value.trim();
   if (!text && !pendingReviewFiles.length) {
     showToast('Paste Terraform source or Terraform plan JSON before reviewing.');
     return;
   }
+  const sequence = ++reviewSequence;
+  reviewBusy = true;
+  $('#reviewStatus').textContent = 'Reviewing infrastructure changes…';
+  syncPrimaryActions();
   try {
     const result = await requestAnalysis(text, pendingReviewFiles, '/api/review');
+    if (sequence !== reviewSequence) return;
     prReview = {
       findings: result.review?.findings || result.analysis?.findings || [],
       introducedFindings: result.review?.introducedFindings || [],
       existingFindings: result.review?.existingFindings || [],
       resolvedFindings: result.review?.resolvedFindings || [],
       diffs: result.review?.diffs || [],
+      baselineResources: result.review?.baselineResources || [],
       counts: result.review?.counts || { add: 0, change: 0, delete: 0 },
       riskScore: result.review?.riskScore ?? 0,
       decision: result.review?.decision || 'Waiting for input',
       analysis: result.analysis || null
     };
     renderPrReview();
-    showToast(`PR review completed (${result.analysis?.metadata?.analysisMode || 'analysis'}).`);
+    $('#reviewStatus').textContent = 'Review complete. Inspect the findings and change impact below.';
+    showToast('PR review completed.');
   } catch (error) {
+    if (sequence !== reviewSequence) return;
+    $('#reviewStatus').textContent = error.message;
     showToast(error.message);
-  }
+  } finally { if (sequence === reviewSequence) { reviewBusy = false; syncPrimaryActions(); } }
 }
 
 function renderPrReview() {
@@ -1698,7 +1794,7 @@ function renderPrReview() {
   $('#prAddCount').textContent = prReview.counts.add || 0;
   $('#prChangeCount').textContent = prReview.counts.change || 0;
   $('#prDeleteCount').textContent = prReview.counts.delete || 0;
-  renderFindingList($('#prFindingList'), prReview.findings || [], 'Run a PR review to generate comments.');
+  renderFindingList($('#prFindingList'), prReview.findings || [], prReview.analysis ? 'No findings on the changed resources assessed in this review.' : 'Run a PR review to generate comments.', prReview.analysis ? 'No change-related findings' : 'Nothing to show');
   renderDiffList();
   window.SableFeatures?.renderReviewer?.();
   syncPrimaryActions();
@@ -1708,7 +1804,7 @@ function renderDiffList() {
   const container = $('#prDiffList');
   container.innerHTML = '';
   if (!prReview.diffs.length) {
-    container.innerHTML = '<div class="empty-state"><strong>No diff yet</strong>Run a PR review to see resource impact.</div>';
+    container.innerHTML = prReview.analysis ? '<div class="empty-state"><strong>No resource changes detected</strong>The reviewed input contains no managed resource changes.</div>' : '<div class="empty-state"><strong>No diff yet</strong>Run a PR review to see resource impact.</div>';
     return;
   }
   prReview.diffs.forEach(diff => {
@@ -1840,9 +1936,11 @@ function syncPrimaryActions() {
 
   if ($('#exportMarkdownBtn')) $('#exportMarkdownBtn').disabled = !hasWorkspace;
   if ($('#setBaselineBtn')) $('#setBaselineBtn').disabled = !hasWorkspace;
-  if ($('#reviewPrBtn')) $('#reviewPrBtn').disabled = !hasReviewInput;
+  if ($('#reviewPrBtn')) $('#reviewPrBtn').disabled = !hasReviewInput || reviewBusy;
+  if ($('#reviewPrBtn')) $('#reviewPrBtn').textContent = reviewBusy ? 'Reviewing…' : 'Review PR risk';
   if ($('#exportPrReportBtn')) $('#exportPrReportBtn').disabled = !(prReview.analysis || prReview.diffs?.length || prReview.findings?.length);
-  if ($('#analyzeImportBtn')) $('#analyzeImportBtn').disabled = !hasImportInput;
+  if ($('#analyzeImportBtn')) $('#analyzeImportBtn').disabled = !hasImportInput || importBusy;
+  if ($('#analyzeImportBtn')) $('#analyzeImportBtn').textContent = importBusy ? 'Analyzing…' : 'Analyze workspace';
   if ($('#clearImportBtn')) $('#clearImportBtn').disabled = !hasImportInput && !currentPreview;
 
   const snapshotBtn = $('#downloadSnapshotBtn');
@@ -1865,7 +1963,7 @@ function downloadFile(filename, content, type) {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
 function infrastructureFileFamily(name = '') {
@@ -1892,9 +1990,7 @@ function validateInfrastructureFiles(files) {
   if (families.size > 1) {
     throw new Error('Import one infrastructure format at a time. Select Terraform files together, YAML files together, or one JSON document.');
   }
-  if (families.has('json') && files.length > 1) {
-    throw new Error('JSON imports support one document at a time. Select a single Terraform plan/state, CloudFormation, Kubernetes, or Sable snapshot JSON file.');
-  }
+
 }
 
 function updateImportFileSummary(files = [], overrideText = '') {
@@ -1918,6 +2014,8 @@ function updateImportFileSummary(files = [], overrideText = '') {
 async function handleFilesSelect(fileList, targetTextarea, callback, context = 'import') {
   const files = Array.from(fileList || []);
   if (!files.length) return;
+  if (context === 'review') invalidateReview(); else invalidateImport();
+  const readSequence = fileReadSequence[context];
   try {
     validateInfrastructureFiles(files);
     const loaded = await Promise.all(files.map(file => new Promise((resolve, reject) => {
@@ -1927,6 +2025,7 @@ async function handleFilesSelect(fileList, targetTextarea, callback, context = '
       reader.readAsText(file);
     })));
 
+    if (readSequence !== fileReadSequence[context]) return;
     if (context === 'review') {
       pendingReviewFiles = loaded.map(({ name, content }) => ({ name, content }));
     } else {
@@ -1939,10 +2038,14 @@ async function handleFilesSelect(fileList, targetTextarea, callback, context = '
       ? loaded[0].content
       : loaded.map(file => `# ---- ${file.name} ----\n${file.content}`).join('\n\n');
 
-    if (typeof callback === 'function') await callback();
+    syncPrimaryActions();
+    if (context === 'import') { currentPreview = null; renderImportPreview(); }
+    // Analysis is an explicit action; selecting a file never submits it.
+    const picker = context === 'review' ? $('#prFileInput') : $('#fileInput');
+    if (picker) picker.value = '';
     showToast(`Loaded ${loaded.length} file${loaded.length === 1 ? '' : 's'} from this device.`);
   } catch (error) {
-    if (context === 'import') updateImportFileSummary([]);
+    if (readSequence !== fileReadSequence[context]) return;
     showToast(error.message);
   }
 }
@@ -1966,6 +2069,14 @@ function debounce(fn, delay) {
 
 function safeParse(value) {
   try { return value ? JSON.parse(value) : null; } catch { return null; }
+}
+
+function readLocalValue(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeLocalValue(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { return false; }
 }
 
 function readLocalJson(key) {

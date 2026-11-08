@@ -1,0 +1,43 @@
+/* Product finish: consistent controls, quieter surfaces, and responsive density. */
+:root { --radius-md: 12px; --radius-lg: 16px; }
+/* Colors inherit from the original S4BLE theme in styles.css. */
+.main { padding-top: 28px; }
+.topbar { margin-bottom: 22px; padding-bottom: 20px; border-color: var(--line); }
+.topbar h1 { font-size: clamp(1.5rem, 2.3vw, 2.15rem); line-height: 1.18; }
+.sidebar { gap: 20px; padding-top: 8px; padding-bottom: 8px; }
+.brand-mark { height: 66px !important; width: 44px !important; }
+.brand-copy span { letter-spacing: .08em; font-size: .62rem; }
+.primary-button,.secondary-button,.ghost-button,.file-button,.mini-button,.icon-button { border-radius: 7px; font-size: .78rem; min-height: 38px; transition: background-color .15s, border-color .15s, box-shadow .15s; }
+.primary-button { font-weight: 650; box-shadow: 0 2px 3px #17285512; }
+.theme-option { border-radius: 4px; }
+button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--cobalt); outline-offset: 3px; }
+.file-button { position: relative; overflow: hidden; }
+.file-button input { display: block; position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.file-button:focus-within { outline: 3px solid var(--cobalt); outline-offset: 3px; }
+.workspace-banner { margin-bottom: 16px; padding: 18px 22px; }
+.workspace-banner h2 { font-size: 1.2rem; }
+.workspace-banner-meta { gap: 8px; }
+.hero-grid { grid-template-columns: minmax(290px, 2.2fr) repeat(4, minmax(100px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.hero-card,.metric-card { min-height: 128px; }
+.hero-card { padding: 18px 22px; gap: 16px; }
+.hero-card .eyebrow { display: block; font-size: .61rem; }
+.hero-card h2 { font-size: 2.7rem; margin-bottom: 6px; }
+.hero-card p:last-child { font-size: .74rem; }
+.score-ring { width: 84px; height: 84px; flex: 0 0 84px; }
+.metric-card { padding: 18px 14px; }
+.metric-card strong { font-size: 2.4rem; }
+.metric-card span { font-size: .68rem; line-height: 1.4; }
+.privacy-note { margin: 12px 20px; font-size: .77rem; line-height: 1.6; color: var(--muted); }
+.operation-status { margin: 0 20px; color: var(--cobalt-deep); font-size: .82rem; line-height: 1.5; overflow-wrap: anywhere; }
+.operation-status:empty { display: none; }
+.workspace-footer { border-top: 1px solid var(--line); margin-top: 32px; padding-top: 20px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: .72rem; line-height: 1.6; color: var(--muted); }
+.workspace-footer button { border: 0; background: transparent; text-decoration: underline; color: var(--ink-soft); padding: 4px; }
+.skip-link { position: fixed; top: -100px; left: 16px; z-index: 10000; padding: 14px; border-radius: 8px; background: var(--surface); color: var(--ink); }
+.skip-link:focus { top: 16px; }
+.no-script { padding: 20px; background: #fff2d0; color: #333; }
+.architecture-empty .secondary-button { margin: 8px; }
+.code-editor { border-radius: 8px; font-size: .81rem; line-height: 1.65; }
+.resource-table td, .finding-resource, .relationship-row, .workspace-banner p { overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .hero-grid { grid-template-columns: repeat(4, minmax(0,1fr)); } .hero-card { grid-column: 1 / -1; min-height: 114px; } .hero-card p:last-child { max-width: 600px; } .metric-card { min-height: 100px; } }
+@media (max-width: 660px) { .main { padding: 20px 12px 40px; } .sidebar { gap: 10px; } .topbar { gap: 16px; } .topbar-actions { gap: 7px; } .topbar-actions .primary-button { flex: 1; } .workspace-banner { padding: 16px; } .hero-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .hero-card { padding: 18px; } .workspace-footer { display: grid; } .panel-header { gap: 12px; } .privacy-note { margin-inline: 16px; } .product-filters label { min-width: 0; max-width: 100%; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

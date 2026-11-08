@@ -1,0 +1,19 @@
+{
+  "workspace": "Practice · Azure access",
+  "resources": [
+    {
+      "id": "azurerm_network_security_rule.admin",
+      "type": "azurerm_network_security_rule",
+      "name": "admin-access",
+      "attributes": {
+        "direction": "Inbound",
+        "access": "Allow",
+        "protocol": "Tcp",
+        "priority": 100,
+        "source_address_prefix": "0.0.0.0/0",
+        "destination_port_range": "3389",
+        "destination_address_prefix": "*"
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "workspace": "Practice · Google Cloud firewall",
+  "resources": [
+    {
+      "id": "google_compute_firewall.admin",
+      "type": "google_compute_firewall",
+      "name": "admin-access",
+      "attributes": {
+        "direction": "INGRESS",
+        "disabled": false,
+        "source_ranges": [
+          "10.20.0.0/16"
+        ],
+        "allow": [
+          {
+            "protocol": "tcp",
+            "ports": [
+              "22"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -4,9 +4,9 @@
   const VIEW_KEY = 'sable.savedViews.v1';
   const POLICY_KEY = 'sable.policyPack.v1';
   const FEATURE_KEY = 'sable.featureState.v1';
-  const NOTES_KEY = 'sable.resourceNotes.v1';
+  const NOTES_KEY = 'sable.resourceNotes.v2';
 
-  const state = loadJson(FEATURE_KEY, {
+  const storedState = loadJson(FEATURE_KEY, {
     lens: 'all',
     showConfirmed: true,
     showInferred: true,
@@ -15,11 +15,22 @@
     incident: false
   });
 
+  const state = {
+    lens: ['all', 'network', 'security', 'reliability', 'observability', 'changes'].includes(storedState.lens) ? storedState.lens : 'all',
+    showConfirmed: storedState.showConfirmed !== false,
+    showInferred: storedState.showInferred !== false,
+    blast: null, path: null, incident: false
+  };
+  if (!state.showConfirmed && !state.showInferred) state.showConfirmed = true;
+  let featureAnalysis = null;
   let lastArchitecture = null;
   let drawerResourceId = null;
+  let drawerTrigger = null;
+  let modalTrigger = null;
   let drawerRelationship = null;
   let searchActiveIndex = -1;
   let policyShowAll = false;
+  let prVisibleLimit = 60;
   const POLICY_VISIBLE_LIMIT = 6;
   const VALID_POLICY_OPERATORS = new Set(['exists', 'equals', 'notEquals', 'min', 'max', 'includes']);
 
@@ -71,7 +82,7 @@
         <div class="iv-commandbar" id="ivArchitectureCommandbar">
           <div class="iv-search-wrap">
             <label class="sr-only" for="ivArchitectureSearch">Search architecture</label>
-            <input id="ivArchitectureSearch" class="iv-search" type="search" autocomplete="off" placeholder="Search resources…" aria-describedby="ivSearchHelp" />
+            <input id="ivArchitectureSearch" class="iv-search" type="search" autocomplete="off" placeholder="Search resources…" aria-describedby="ivSearchHelp" role="combobox" aria-autocomplete="list" aria-controls="ivSearchResults" aria-expanded="false" />
             <div class="iv-search-help" id="ivSearchHelp">Try a name or filters such as <code>type:rds</code>, <code>risk:high</code>, or <code>category:network</code>.</div>
             <div class="iv-search-results hidden" id="ivSearchResults" role="listbox" aria-label="Architecture search results"></div>
           </div>
@@ -109,9 +120,9 @@
       `);
     }
 
-    const workspaceBanner = document.querySelector('#workspaceBanner');
-    if (workspaceBanner) {
-      workspaceBanner.insertAdjacentHTML('afterend', `
+    const architecturePanel = document.querySelector('#architecturePanel');
+    if (architecturePanel) {
+      architecturePanel.insertAdjacentHTML('afterend', `
         <section class="panel iv-coverage-panel" id="ivCoveragePanel">
           <div class="panel-header compact">
             <div>
@@ -183,7 +194,7 @@
 
     document.body.insertAdjacentHTML('beforeend', `
       <div class="iv-drawer-backdrop hidden" id="ivDrawerBackdrop"></div>
-      <aside class="iv-drawer" id="ivDetailsDrawer" aria-label="Infrastructure details" aria-hidden="true">
+      <aside class="iv-drawer" id="ivDetailsDrawer" role="dialog" aria-modal="true" aria-labelledby="ivDrawerTitle" aria-hidden="true" inert>
         <div class="iv-drawer-header">
           <div>
             <p class="eyebrow" id="ivDrawerEyebrow">Resource details</p>
@@ -226,8 +237,12 @@
         if (!options.length) return;
         event.preventDefault();
         const delta = event.key === 'ArrowDown' ? 1 : -1;
-        searchActiveIndex = (searchActiveIndex + delta + options.length) % options.length;
-        options.forEach((item, index) => item.classList.toggle('active', index === searchActiveIndex));
+        searchActiveIndex = searchActiveIndex < 0 ? (delta > 0 ? 0 : options.length - 1) : (searchActiveIndex + delta + options.length) % options.length;
+        options.forEach((item, index) => {
+          item.classList.toggle('active', index === searchActiveIndex);
+          item.setAttribute('aria-selected', String(index === searchActiveIndex));
+        });
+        search.setAttribute('aria-activedescendant', options[searchActiveIndex].id);
         options[searchActiveIndex]?.scrollIntoView({ block: 'nearest' });
         return;
       }
@@ -247,6 +262,7 @@
     document.querySelector('#ivConfirmedToggle')?.addEventListener('change', event => {
       state.showConfirmed = event.target.checked;
       if (!state.showConfirmed && !state.showInferred) state.showInferred = true;
+      resetGraphFocus();
       syncControls();
       saveFeatureState();
       renderArchitecture();
@@ -254,6 +270,7 @@
     document.querySelector('#ivInferredToggle')?.addEventListener('change', event => {
       state.showInferred = event.target.checked;
       if (!state.showConfirmed && !state.showInferred) state.showConfirmed = true;
+      resetGraphFocus();
       syncControls();
       saveFeatureState();
       renderArchitecture();
@@ -346,14 +363,24 @@
         const notes = loadResourceNotes();
         const value = String(textarea?.value || '').trim();
         if (value) notes[drawerResourceId] = value; else delete notes[drawerResourceId];
-        storageSet(NOTES_KEY, notes);
-        showToast(value ? 'Resource note saved locally.' : 'Resource note removed.');
+        const allNotes = loadNoteStore();
+        allNotes[noteWorkspaceKey()] = notes;
+        if (storageSet(NOTES_KEY, allNotes)) showToast(value ? 'Resource note saved locally.' : 'Resource note removed.');
       }
     });
 
     document.querySelector('#ivModalClose')?.addEventListener('click', closeModal);
     document.querySelector('#ivModalBackdrop')?.addEventListener('click', closeModal);
     document.addEventListener('keydown', event => {
+      if (event.key === 'Tab') {
+        const dialog = document.querySelector('#ivModal:not(.hidden)') || document.querySelector('#ivDetailsDrawer.open');
+        if (dialog) {
+          const focusable = [...dialog.querySelectorAll('button, input, select, textarea, a[href], summary, [tabindex="0"]')].filter(node => !node.disabled && node.getClientRects().length);
+          const first = focusable[0], last = focusable.at(-1);
+          if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+          if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+        }
+      }
       const row = event.target.closest?.('#resourceTableBody tr[data-resource-key]');
       if (row && (event.key === 'Enter' || event.key === ' ')) {
         event.preventDefault();
@@ -385,12 +412,18 @@
     });
 
     document.querySelector('#ivPrArchitecturePanel')?.addEventListener('click', event => {
+      if (event.target.closest('[data-pr-show-more]')) {
+        prVisibleLimit += 60;
+        renderPrArchitecture(document.querySelector('[data-pr-view].active')?.dataset.prView || 'overlay');
+        return;
+      }
       const button = event.target.closest('[data-pr-view]');
       if (!button) return;
+      prVisibleLimit = 60;
       document.querySelectorAll('[data-pr-view]').forEach(item => item.classList.toggle('active', item === button));
       renderPrArchitecture(button.dataset.prView);
     });
-    document.querySelector('#ivPrChangedOnly')?.addEventListener('change', () => renderPrArchitecture(document.querySelector('[data-pr-view].active')?.dataset.prView || 'overlay'));
+    document.querySelector('#ivPrChangedOnly')?.addEventListener('change', () => { prVisibleLimit = 60; renderPrArchitecture(document.querySelector('[data-pr-view].active')?.dataset.prView || 'overlay'); });
     document.querySelector('#ivPolicyResults')?.addEventListener('click', event => {
       const more = event.target.closest('[data-policy-show-all]');
       if (!more) return;
@@ -447,6 +480,12 @@
 
   function renderAllFeatures() {
     ensureUi();
+    if (featureAnalysis !== currentAnalysis) {
+      resetGraphFocus();
+      closeSearchResults();
+      if (featureAnalysis && document.querySelector('#ivDetailsDrawer')?.classList.contains('open')) closeDrawer();
+      featureAnalysis = currentAnalysis;
+    }
     renderCoverage();
     renderPolicyPanel();
     refreshSavedViews();
@@ -461,6 +500,7 @@
     bindMinimapScroll();
     renderMinimap(payload);
     applyVisualState();
+    syncControls();
   }
 
   function applyVisualState() {
@@ -511,34 +551,35 @@
     }
     const allResults = (currentAnalysis.resources || []).filter(resource => resourceMatchesQuery(resource, trimmed));
     const results = allResults.slice(0, 12);
-    container.innerHTML = results.length ? `${results.map(resource => {
+    container.innerHTML = results.length ? `${results.map((resource, index) => {
       const risk = getResourceRiskSummary(resource);
       const severity = risk.maxSeverity ? `<em class="iv-search-risk ${esc(risk.maxSeverity)}">${esc(risk.maxSeverity)}</em>` : '';
-      return `<button type="button" role="option" data-resource-id="${esc(resourceKey(resource))}" aria-label="Open ${esc(resource.name)}">
+      return `<button type="button" role="option" id="iv-search-result-${index}" aria-selected="false" data-resource-id="${esc(resourceKey(resource))}" aria-label="Open ${esc(resource.name)}">
         <div><strong>${esc(resource.name)}</strong>${severity}</div>
         <span>${esc(resource.type)} · ${esc(CATEGORY_META[resource.category]?.label || resource.category)}${resource.action && resource.action !== 'present' ? ` · ${esc(resource.action)}` : ''}</span>
       </button>`;
     }).join('')}${allResults.length > results.length ? `<div class="iv-search-count">Showing 12 of ${allResults.length} matches. Refine the search to narrow results.</div>` : ''}` : '<div class="iv-search-empty">No matching resources. Try a broader term or remove a filter.</div>';
     container.classList.remove('hidden');
+    document.querySelector('#ivArchitectureSearch')?.setAttribute('aria-expanded', 'true');
   }
 
   function resourceMatchesQuery(resource, query) {
     const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     const findings = findingsFor(resourceKey(resource));
     return tokens.every(rawToken => {
-      const token = rawToken.replace(/^"|"$/g, '');
+      const token = rawToken.replace(/"/g, '');
       const sep = token.indexOf(':');
       if (sep > 0) {
         const field = token.slice(0, sep).toLowerCase();
         const value = token.slice(sep + 1).toLowerCase();
-        if (field === 'type') return resource.type.toLowerCase().includes(value);
+        if (field === 'type') return String(resource.type || '').toLowerCase().includes(value);
         if (field === 'category') return String(resource.category).toLowerCase().includes(value) || String(CATEGORY_META[resource.category]?.label || '').toLowerCase().includes(value);
         if (field === 'provider') return String(resource.provider).toLowerCase().includes(value);
         if (field === 'name') return String(resource.name).toLowerCase().includes(value);
         if (field === 'risk') return findings.some(f => f.severity === value);
         if (field === 'changed') return (value === 'true') === Boolean(resource.action && resource.action !== 'present');
       }
-      const haystack = `${resource.name} ${resource.type} ${resource.provider} ${resource.category} ${resource.address || ''}`.toLowerCase();
+      const haystack = `${resource.name} ${resource.type} ${resource.provider} ${resource.category} ${resource.id || resource.address || ''}`.toLowerCase();
       return haystack.includes(token.toLowerCase());
     });
   }
@@ -546,6 +587,9 @@
   function closeSearchResults() {
     searchActiveIndex = -1;
     document.querySelector('#ivSearchResults')?.classList.add('hidden');
+    const search = document.querySelector('#ivArchitectureSearch');
+    search?.setAttribute('aria-expanded', 'false');
+    search?.removeAttribute('aria-activedescendant');
   }
 
   function focusResource(id, openDrawer = false) {
@@ -611,15 +655,20 @@
   }
 
   function openDrawer() {
+    if (!document.querySelector('#ivDetailsDrawer')?.classList.contains('open')) drawerTrigger = document.activeElement;
+    document.querySelector('#ivDetailsDrawer').inert = false;
     document.querySelector('#ivDetailsDrawer')?.classList.add('open');
     document.querySelector('#ivDetailsDrawer')?.setAttribute('aria-hidden', 'false');
     document.querySelector('#ivDrawerBackdrop')?.classList.remove('hidden');
+    document.querySelector('#ivDrawerClose')?.focus();
   }
 
   function closeDrawer() {
     document.querySelector('#ivDetailsDrawer')?.classList.remove('open');
     document.querySelector('#ivDetailsDrawer')?.setAttribute('aria-hidden', 'true');
     document.querySelector('#ivDrawerBackdrop')?.classList.add('hidden');
+    document.querySelector('#ivDetailsDrawer').inert = true;
+    if (drawerTrigger?.isConnected) drawerTrigger.focus();
     setDrawerMode('resource');
   }
 
@@ -675,8 +724,20 @@
       </section>`;
   }
 
+  function noteWorkspaceKey() {
+    return JSON.stringify([workspace.workspace || '', workspace.sourceType || '']);
+  }
+
+  function loadNoteStore() {
+    try {
+      const value = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}');
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    } catch { return {}; }
+  }
+
   function loadResourceNotes() {
-    try { return JSON.parse(localStorage.getItem(NOTES_KEY) || '{}') || {}; } catch { return {}; }
+    const notes = loadNoteStore()[noteWorkspaceKey()];
+    return notes && typeof notes === 'object' && !Array.isArray(notes) ? notes : {};
   }
 
   function renderResourceRelationships(resource) {
@@ -983,10 +1044,15 @@
     return !set || set.has(id);
   }
 
-  function clearGraphFocus() {
+  function resetGraphFocus() {
     state.path = null;
     state.blast = null;
     state.incident = false;
+  }
+
+  function clearGraphFocus() {
+    resetGraphFocus();
+    syncControls();
     applyVisualState();
     renderFocusBanner();
   }
@@ -1062,6 +1128,7 @@
     const stage = document.querySelector('#explorerStage');
     if (!canvas || !stage) return;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
     const cssW = 190, cssH = 118;
     if (canvas.width !== Math.round(cssW * dpr)) {
@@ -1083,7 +1150,10 @@
   function updateMinimapViewport() { window.requestAnimationFrame(drawMinimap); }
 
   function readBaseline() {
-    try { return JSON.parse(localStorage.getItem(BASELINE_KEY) || 'null'); }
+    try {
+      const baseline = JSON.parse(localStorage.getItem(BASELINE_KEY) || 'null');
+      return baseline && Array.isArray(baseline.resources) && baseline.resources.every(resource => resource && typeof resource === 'object' && !Array.isArray(resource)) ? baseline : null;
+    }
     catch { return null; }
   }
 
@@ -1190,7 +1260,8 @@
   function loadSavedViews() {
     try {
       const parsed = JSON.parse(localStorage.getItem(VIEW_KEY) || '{}');
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? Object.fromEntries(Object.entries(parsed).filter(([, view]) => view && typeof view === 'object' && !Array.isArray(view) && typeof view.name === 'string')) : {};
     } catch { return {}; }
   }
 
@@ -1248,6 +1319,8 @@
     state.lens = ['all', 'network', 'security', 'reliability', 'observability', 'changes'].includes(view.lens) ? view.lens : 'all';
     state.showConfirmed = view.showConfirmed !== false;
     state.showInferred = view.showInferred !== false;
+    if (!state.showConfirmed && !state.showInferred) state.showConfirmed = true;
+    resetGraphFocus();
     syncControls();
     saveFeatureState();
     applyArchitectureZoom();
@@ -1403,8 +1476,11 @@
       const attribute = String(require.attribute || '').trim();
       const operator = String(require.operator || 'exists');
       if (!attribute) throw new Error(`Rule ${id} is missing require.attribute.`);
+      if (attribute.split('.').some(part => ['__proto__', 'prototype', 'constructor'].includes(part))) throw new Error(`Rule ${id} uses an invalid attribute path.`);
+      if (operator !== 'exists' && !Object.hasOwn(require, 'value')) throw new Error(`Rule ${id} is missing require.value.`);
+      if (operator === 'exists' && require.value !== undefined && typeof require.value !== 'boolean') throw new Error(`Rule ${id} requires a boolean value for exists.`);
       if (!VALID_POLICY_OPERATORS.has(operator)) throw new Error(`Rule ${id} uses unsupported operator “${operator}”.`);
-      if (['min', 'max'].includes(operator) && !Number.isFinite(Number(require.value))) throw new Error(`Rule ${id} requires a numeric value for ${operator}.`);
+      if (['min', 'max'].includes(operator) && !isPolicyNumber(require.value)) throw new Error(`Rule ${id} requires a numeric value for ${operator}.`);
       const severity = String(rule.severity || 'medium').toLowerCase();
       if (!['critical', 'high', 'medium', 'low'].includes(severity)) throw new Error(`Rule ${id} has unsupported severity “${severity}”.`);
       const match = rule.match && typeof rule.match === 'object' && !Array.isArray(rule.match) ? rule.match : {};
@@ -1468,7 +1544,8 @@
     let value = object;
     for (const part of parts) {
       if (value == null) return undefined;
-      if (value[part] !== undefined) value = value[part];
+      if (['__proto__', 'prototype', 'constructor'].includes(part)) return undefined;
+      if (Object.hasOwn(Object(value), part)) value = value[part];
       else {
         const key = Object.keys(value).find(k => k.toLowerCase() === part.toLowerCase());
         value = key ? value[key] : undefined;
@@ -1477,16 +1554,22 @@
     return value;
   }
 
+  function isPolicyNumber(value) {
+    return (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value));
+  }
+
   function requirementPasses(value, requirement) {
     const op = requirement.operator || 'exists';
     const expected = requirement.value;
     if (op === 'exists') return expected === false ? value == null : value != null;
-    if (op === 'equals') return value === expected;
-    if (op === 'notEquals') return value !== expected;
-    if (op === 'min') return Number(value) >= Number(expected);
-    if (op === 'max') return Number(value) <= Number(expected);
-    if (op === 'includes') return Array.isArray(value) ? value.includes(expected) : String(value || '').includes(String(expected));
-    return true;
+    // Missing or unresolved evidence cannot satisfy a non-existence policy check.
+    if (value == null || (typeof value === 'string' && /\$\{[^}]+\}/.test(value))) return false;
+    if (op === 'equals') return stable(value) === stable(expected);
+    if (op === 'notEquals') return stable(value) !== stable(expected);
+    if (op === 'min') return isPolicyNumber(value) && Number(value) >= Number(expected);
+    if (op === 'max') return isPolicyNumber(value) && Number(value) <= Number(expected);
+    if (op === 'includes') return Array.isArray(value) ? value.some(item => stable(item) === stable(expected)) : typeof value === 'string' && value.includes(String(expected));
+    return false;
   }
 
   function renderPrArchitecture(mode = 'overlay') {
@@ -1495,12 +1578,12 @@
     if (!container) return;
     const proposed = prReview?.analysis?.resources || [];
     const baseline = readBaseline();
-    const current = baseline?.resources?.length ? baseline.resources : (currentAnalysis.resources || workspace.resources || []);
+    const current = prReview.baselineResources || (baseline?.resources?.length ? baseline.resources : (currentAnalysis.resources || workspace.resources || []));
     const diffs = prReview?.diffs || [];
     const changedOnly = document.querySelector('#ivPrChangedOnly')?.checked !== false;
     if (!proposed.length && !diffs.length) {
       if (summary) summary.innerHTML = '';
-      container.innerHTML = '<div class="iv-empty"><strong>No PR architecture yet</strong>Run a PR review to visualize the resources affected by the proposed infrastructure change.</div>';
+      container.innerHTML = prReview.analysis ? '<div class="iv-empty"><strong>No resources in this reviewed plan</strong>The plan contains no proposed resources or managed resource changes to display.</div>' : '<div class="iv-empty"><strong>No PR architecture yet</strong>Run a PR review to visualize the resources affected by the proposed infrastructure change.</div>';
       return;
     }
     const currentMap = new Map(current.map(r => [resourceKey(r), normalizeResource(r)]));
@@ -1532,8 +1615,8 @@
     resources.forEach(r => { const c = r.category || 'other'; if (!groups.has(c)) groups.set(c, []); groups.get(c).push(r); });
     container.innerHTML = Array.from(groups.entries()).sort((a,b)=>(CATEGORY_META[a[0]]?.order||99)-(CATEGORY_META[b[0]]?.order||99)).map(([category, items]) => {
       const sorted = [...items].sort((a,b) => actionOrder(a._diff)-actionOrder(b._diff) || String(a.name).localeCompare(String(b.name)));
-      const visible = sorted.slice(0, 60);
-      return `<section class="iv-pr-lane"><h3>${esc(CATEGORY_META[category]?.label || category)} <span>${items.length}</span></h3><div>${visible.map(r => `<button type="button" class="iv-pr-node ${esc(r._diff)}" data-pr-resource="${esc(resourceKey(r))}" title="Inspect ${esc(r.name)}"><span>${diffSymbol(r._diff)}</span><strong>${esc(r.name)}</strong><small>${esc(r.type)}</small></button>`).join('')}${items.length > visible.length ? `<div class="iv-pr-more">+${items.length - visible.length} more resources in this category. Use “Changes only” or inspect the imported architecture for the full inventory.</div>` : ''}</div></section>`;
+      const visible = sorted.slice(0, prVisibleLimit);
+      return `<section class="iv-pr-lane"><h3>${esc(CATEGORY_META[category]?.label || category)} <span>${items.length}</span></h3><div>${visible.map(r => `<button type="button" class="iv-pr-node ${esc(r._diff)}" data-pr-resource="${esc(resourceKey(r))}" title="Inspect ${esc(r.name)}"><span>${diffSymbol(r._diff)}</span><strong>${esc(r.name)}</strong><small>${esc(r.type)}</small></button>`).join('')}${items.length > visible.length ? `<button type="button" class="secondary-button iv-pr-more" data-pr-show-more>Show more · ${items.length - visible.length} remaining in this category</button>` : ''}</div></section>`;
     }).join('');
   }
 
@@ -1543,7 +1626,7 @@
 
   function openPrResourceModal(id) {
     const baseline = readBaseline();
-    const current = baseline?.resources?.length ? baseline.resources : (currentAnalysis.resources || workspace.resources || []);
+    const current = prReview.baselineResources || (baseline?.resources?.length ? baseline.resources : (currentAnalysis.resources || workspace.resources || []));
     const proposed = prReview?.analysis?.resources || [];
     const before = current.find(resource => resourceKey(resource) === id);
     const after = proposed.find(resource => resourceKey(resource) === id);
@@ -1578,20 +1661,24 @@
 
   function renderReviewer() {
     ensureUi();
+    prVisibleLimit = 60;
     renderPrArchitecture(document.querySelector('[data-pr-view].active')?.dataset.prView || 'overlay');
   }
 
   function openModal(title, content) {
     ensureUi();
+    modalTrigger = document.activeElement;
     document.querySelector('#ivModalTitle').textContent = title;
     document.querySelector('#ivModalBody').innerHTML = content;
     document.querySelector('#ivModal').classList.remove('hidden');
     document.querySelector('#ivModalBackdrop').classList.remove('hidden');
+    document.querySelector('#ivModalClose')?.focus();
   }
 
   function closeModal() {
     document.querySelector('#ivModal')?.classList.add('hidden');
     document.querySelector('#ivModalBackdrop')?.classList.add('hidden');
+    if (modalTrigger?.isConnected) modalTrigger.focus();
   }
 
   function download(filename, content, type) {
@@ -1603,7 +1690,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   window.SableFeatures = {
@@ -1611,6 +1698,7 @@
     renderReviewer,
     afterArchitectureRender,
     filterLinks,
+    focusResourceIds: activeFocusSet,
     onResourceSelected: id => openResourceDrawer(id)
   };
 
